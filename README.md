@@ -12,7 +12,7 @@ Thanks to all [Contributors](CONTRIBUTORS.md)!
 
 **NOTICE: This version 2 replaces [*mORMot 1.18*](https://github.com/synopse/mORMot) which is now in maintainance-only mode. Consider using *mORMot 2* for any new or maintainable project.**
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zen010101/mORMot2)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/synopse/mORMot2)
 
 ## Resources
 
@@ -165,4 +165,5 @@ Quick Steps when upgrading from a previous 1.18 revision:
  - Delphi 5-6 and Kylix compatibility removed;
  - BigTable, LVCL, RTTI-UI deprecated.
  
+
 
