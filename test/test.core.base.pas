@@ -4621,6 +4621,7 @@ begin
   DoubleToShort(@a, d);
   Check(IdemPropName(a, 'Nan'));
   Check(ShortToFloatNan(a) = fnNan);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnNan]);
   s := 'INF';
   d := GetExtended(pointer(s), err);
   CheckEqual(err, 0, s);
@@ -4628,6 +4629,7 @@ begin
   DoubleToShort(@a, d);
   Check((a = '+Inf') or (a = 'INF'));
   Check(ShortToFloatNan(a) = fnInf);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnInf]);
   s := '-INfinity';
   d := GetExtended(pointer(s), err);
   CheckEqual(err, 0, s);
@@ -4635,6 +4637,7 @@ begin
   DoubleToShort(@a, d);
   Check(IdemPropName(a, '-Inf'));
   Check(ShortToFloatNan(a) = fnNegInf);
+  Check(FloatToJsonNan(@a)^ = JSON_NAN[fnNegInf]);
   Check(IsAnsiCompatible('t'));
   Check(IsAnsiCompatible('te'));
   Check(IsAnsiCompatible('tes'));
@@ -5267,6 +5270,7 @@ var
   W: WinAnsiString;
   WS: WideString;
   SU, SU2: SynUnicode;
+  WU: array[0..3] of WideChar;
   str: string;
   ss: ShortString;
   up4: RawUcs4;
@@ -5276,6 +5280,7 @@ var
   PB: PByte;
   q: RawUtf8;
   Unic: RawByteString;
+  Ucs4: RawUcs4;
   WA, HasValidUtf8Avx2: Boolean;
   lng: TLanguage;
   rb1, rb2, rb3: RawByteString;
@@ -5290,6 +5295,8 @@ const
     'TEST', 'TEST', 'TES', 'TEST', 'TESTE', 't', 'U', '2', 'TESTe');
   CHINESE_TEXT: array[0..8] of byte = (
     $e4, $b8, $ad, $e6, $96, $87, $61, $62, $63);
+  UTF8_UCS4: array[0..11] of cardinal = ($01, $81, $801, $fff, $ffff, $10000,
+    UNICODE_MAX, UNICODE_MAX + 1, $1000000, $2000000, $10000000, $7f000000);
 begin
   // Trim*() functions
   CheckEqual(TrimU(''), '');
@@ -6138,34 +6145,34 @@ begin
     Check(not IsZero(pointer(W), length(W)));
     FillCharFast(pointer(W)^, length(W), 0);
     Check(IsZero(pointer(W), length(W)));
-    Check(FormatUtf8(U, []) = U);
+    CheckEqual(FormatUtf8(U, []), U);
     res := FormatSql(U, [], []); // Delphi 5 bug with high([])>0 :(
-    Check(length(res) = Length(U));
-    Check(res = U);
-    Check(FormatUtf8('%', [U]) = U);
-    Check(FormatSql('%', [U], []) = U);
+    CheckEqual(length(res), Length(U));
+    CheckEqual(res, U);
+    CheckEqual(FormatUtf8('%', [U]), U);
+    CheckEqual(FormatSql('%', [U], []), U);
     q := ':(' + QuotedStr(U) + '):';
-    Check(FormatSql('?', [], [U]) = q);
+    CheckEqual(FormatSql('?', [], [U]), q);
     res := 'ab' + U;
     q := 'ab' + q;
-    Check(FormatUtf8('ab%', [U]) = res);
-    Check(FormatUtf8('%%', ['ab', U]) = res);
-    Check(FormatSql('ab%', [U], []) = res);
-    Check(FormatSql('%%', ['ab', U], []) = res);
-    Check(FormatSql('ab?', [], [U]) = q);
-    Check(FormatSql('%?', ['ab'], [U]) = q);
+    CheckEqual(FormatUtf8('ab%', [U]), res);
+    CheckEqual(FormatUtf8('%%', ['ab', U]), res);
+    CheckEqual(FormatSql('ab%', [U], []), res);
+    CheckEqual(FormatSql('%%', ['ab', U], []), res);
+    CheckEqual(FormatSql('ab?', [], [U]), q);
+    CheckEqual(FormatSql('%?', ['ab'], [U]), q);
     res := res + 'cd';
     q := q + 'cd';
-    Check(FormatUtf8('ab%cd', [U]) = res);
-    Check(FormatSql('ab%cd', [U], []) = res);
-    Check(FormatUtf8('a%%cd', ['b', U]) = res);
-    Check(FormatSql('a%%cd', ['b', U], []) = res);
-    Check(FormatUtf8('%%%', ['ab', U, 'cd']) = res);
-    Check(FormatSql('ab?cd', [], [U]) = q);
-    Check(FormatSql('%?cd', ['ab'], [U]) = q);
-    Check(FormatSql('%?%', ['ab', 'cd'], [U]) = q);
-    Check(FormatSql('%?c%', ['ab', 'd'], [U]) = q);
-    Check(FormatSql('a%?%d', ['b', 'c'], [U]) = q);
+    CheckEqual(FormatUtf8('ab%cd', [U]), res);
+    CheckEqual(FormatSql('ab%cd', [U], []), res);
+    CheckEqual(FormatUtf8('a%%cd', ['b', U]), res);
+    CheckEqual(FormatSql('a%%cd', ['b', U], []), res);
+    CheckEqual(FormatUtf8('%%%', ['ab', U, 'cd']), res);
+    CheckEqual(FormatSql('ab?cd', [], [U]), q);
+    CheckEqual(FormatSql('%?cd', ['ab'], [U]), q);
+    CheckEqual(FormatSql('%?%', ['ab', 'cd'], [U]), q);
+    CheckEqual(FormatSql('%?c%', ['ab', 'd'], [U]), q);
+    CheckEqual(FormatSql('a%?%d', ['b', 'c'], [U]), q);
   end;
   SetLength(U, 4);
   U[1] := #$F0;
@@ -6177,6 +6184,9 @@ begin
     Check(PCardinal(SU)^ = $DCD2D863);
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
   Check(Utf8FirstLineToUtf16Length(Pointer(U)) = 2);
+  PCardinal(@WU)^ := 0;
+  if CheckEqual(Utf8ToWideChar(WU, pointer(U), SizeOf(WU), length(U), false), 4) then
+    Check(PCardinal(@WU)^ = $DCD2D863);
   U := SynUnicodeToUtf8(SU);
   if not CheckFailed(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
@@ -6195,6 +6205,14 @@ begin
   PB := pointer(res);
   FromVarString(PB, U2);
   check(U2 = U);
+  for i := 0 to high(UTF8_UCS4) do
+  begin
+    RawUcs4ToUtf8(@UTF8_UCS4[i], 1, U);
+    Check(U <> '');
+    Ucs4 := Utf8ToRawUcs4(U);
+    CheckEqual(length(Ucs4), 1);
+    CheckEqual(Ucs4[0], UTF8_UCS4[i]);
+  end;
   FastSetString(U, @CHINESE_TEXT, 9);
   CheckEqual(StrLen(pointer(U)), 9);
   SU := Utf8ToSynUnicode(U);
@@ -8904,7 +8922,26 @@ begin
     'Feedfetcher-Google; (+http://www.google.com/feedfetcher.html; 1 subscribers; feed-id=728742641706423)'));
   Check(IsHttpUserAgentBot(
     'Python-urllib/3.4'));
-  // some HTTP methods
+  // some HTTP headers processing methods
+  Check(not IsInvalidHttpHeader(''));
+  Check(not IsInvalidHttpHeader('a=b'));
+  Check(not IsInvalidHttpHeader('a'#13#10));
+  Check(not IsInvalidHttpHeader('a'#13#10'b'#13#10));
+  Check(not IsInvalidHttpHeader('a'#13#10'b'));
+  Check(IsInvalidHttpHeader(#13#10'a'#13#10));
+  Check(IsInvalidHttpHeader(#10'a'#13#10));
+  Check(IsInvalidHttpHeader(#13#10#13#10'a'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  Check(IsInvalidHttpHeader('a'#10'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10#13#10'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#13#10#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10#13'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#13'b'#13#10));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#13#13));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#13));
+  Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  s := 'toto'#13#10;
+  Check(not IsInvalidHttpHeader(s));
   CheckEqual(PurgeHeaders(''), '');
   CheckEqual(PurgeHeaders('toto'), 'toto');
   CheckEqual(PurgeHeaders(#13#10), #13#10);
@@ -8915,7 +8952,6 @@ begin
   CheckEqual(PurgeHeaders('toto', true), 'toto');
   CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10, true), 'toto');
   CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10, true), 'toto');
-  s := 'toto'#13#10;
   CheckEqual(PurgeHeaders(s), s);
   CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10), s);
   CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10), s);
@@ -8923,6 +8959,15 @@ begin
     'accept: all'#13#10'toto'#13#10'content-length: 10'#13#10), s);
   CheckEqual(PurgeHeaders(
     'accept: all'#13#10'content-length: 10'#13#10'toto'#13#10), s);
+  CheckEqual(DeleteHeader(s, ''), s);
+  CheckEqual(DeleteHeader('content-length: 10'#13#10'toto'#13#10, 'content-length'), s);
+  CheckEqual(DeleteHeader('toto'#13#10'content-length: 10'#13#10, 'Content-Length'), s);
+  CheckEqual(DeleteHeader(Join([s, s, s, 'Auth: 1']), 'auth'), Join([s, s, s]));
+  CheckEqual(DeleteHeader(Join(['Auth: 0'#13#10, s, s, s]), 'auth'), Join([s, s, s]));
+  CheckEqual(DeleteHeader(Join(['Auth: 0'#13#10, s, s, s, 'Auth: 1']), 'auth'), Join([s, s, s]));
+  CheckEqual(DeleteHeader(Join([s, s, s, 'Auth: 2'#13#10, s]), 'auth'), Join([s, s, s, s]));
+  CheckEqual(DeleteHeader(Join([s, s, s, 'Auth: 2'#13#10, 'ab']), 'auth'), Join([s, s, s, 'ab']));
+  // some HTTP methods
   Check(HttpMethodWithNoBody('HEAD'));
   Check(HttpMethodWithNoBody('head'));
   Check(HttpMethodWithNoBody('HEADER'));

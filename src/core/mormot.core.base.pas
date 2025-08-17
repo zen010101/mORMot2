@@ -280,6 +280,10 @@ type
 
   /// store one 32-bit UCS-4 CodePoint (with a better naming than UCS-4 "Char")
   // - RTL's Ucs4Char is buggy, especially on oldest Delphi
+  // - the Unicode Consortium defined the Universal Character Set (UCS) in its
+  // ISO/IEC 10646 standard, assuming U+0000..U+10FFFF range restriction
+  // - mormot.core.unicode supports the original UTF-8 encoding and decoding up
+  // to U+7FFFFFFF (2^31-1) when this Ucs4CodePoint type is used
   Ucs4CodePoint = cardinal;
   /// pointer to one 32-bit UCS-4 CodePoint
   PUcs4CodePoint = ^Ucs4CodePoint;
@@ -777,6 +781,11 @@ const
   FALSE_LOW  = ord('f') + ord('a') shl 8 + ord('l') shl 16 + ord('s') shl 24;
   FALSE_LOW2 = ord('a') + ord('l') shl 8 + ord('s') shl 16 + ord('e') shl 24;
   TRUE_LOW   = ord('t') + ord('r') shl 8 + ord('u') shl 16 + ord('e') shl 24;
+  FALSE_HI   = ord('F') + ord('A') shl 8 + ord('L') shl 16 + ord('S') shl 24;
+  TRUE_HI    = ord('T') + ord('R') shl 8 + ord('U') shl 16 + ord('E') shl 24;
+  YES_HI     = ord('Y') + ord('E') shl 8 + ord('S') shl 16;
+  HOST_127   = ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24;
+  HOST_127_4 = ord('0') + ord('.') shl 8 + ord('0') shl 16 + ord('.') shl 24;
 
 /// fill a TGuid with 0
 procedure FillZero(var result: TGuid); overload;
@@ -2482,7 +2491,7 @@ procedure FillZero(out dig: THash128); overload;
   {$ifdef CPU64}inline;{$endif}
 
 /// fast O(n) search of a 128-bit item in an array of such values
-function Hash128Index(P: PHash128Rec; Count: integer; h: PHash128Rec): integer;
+function Hash128Index(P: PHash128Rec; Count: PtrInt; h: PHash128Rec): PtrInt;
 
 /// add a 128-bit item in an array of such values
 function AddHash128(var Arr: THash128DynArray;
@@ -2535,7 +2544,7 @@ function IsEqual(const A, B: THash256): boolean; overload;
   {$ifdef CPU64}inline;{$endif}
 
 /// fast O(n) search of a 256-bit item in an array of such values
-function Hash256Index(P: PHash256Rec; Count: integer; h: PHash256Rec): integer;
+function Hash256Index(P: PHash256Rec; Count: PtrInt; h: PHash256Rec): PtrInt;
 
 /// fill all 32 bytes of this 256-bit buffer with zero
 // - may be used to cleanup stack-allocated content
@@ -5942,8 +5951,7 @@ function GetBoolean(P: PUtf8Char): boolean;
 begin
   result := (P <> nil) and
             (PInteger(P)^ <> FALSE_LOW) and
-            ((PInteger(P)^ = TRUE_LOW) or
-             ((PInteger(P)^ and $ffff) <> ord('0')));
+            (PWord(P)^ <> ord('0'));
 end;
 
 function GetBoolean(const value: RawUtf8): boolean;
@@ -5962,8 +5970,8 @@ end;
 function GetTrue(P: PUtf8Char): integer;
 begin
   result := PInteger(P)^ and $dfdfdfdf;
-  if (result = ord('T') + ord('R') shl 8 + ord('U') shl 16 + ord('E') shl 24) or
-     (result = ord('Y') + ord('E') shl 8 + ord('S') shl 16) then
+  if (result = TRUE_HI) or
+     (result = YES_HI) then
     result := 1
   else
     result := 0;
@@ -5980,11 +5988,11 @@ begin
   if err = 0 then
     exit;
   c := PInteger(P)^ and $dfdfdfdf;
-  if (c = ord('F') + ord('A') shl 8 + ord('L') shl 16 + ord('S') shl 24) or
+  if (c = FALSE_HI) or
      (c and $ffffff = ord('N') + ord('O') shl 8) then
     V := 0
-  else if (c = ord('T') + ord('R') shl 8 + ord('U') shl 16 + ord('E') shl 24) or
-          (c = ord('Y') + ord('E') shl 8 + ord('S') shl 16) then
+  else if (c = TRUE_HI) or
+          (c = YES_HI) then
     V := 1
   else
     result := false;
@@ -8792,47 +8800,63 @@ end;
 
 {$ifdef CPU64}
 
-function Hash128Index(P: PHash128Rec; Count: integer; h: PHash128Rec): integer;
+function Hash128Index(P: PHash128Rec; Count: PtrInt; h: PHash128Rec): PtrInt;
 var
   _0, _1: PtrInt; // is likely to use CPU registers
+label
+  next;
 begin
   if P <> nil then
   begin
     _0 := h^.Lo;
     _1 := h^.Hi;
-    for result := 0 to Count - 1 do
-      if (P^.Lo = _0) and
-         (P^.Hi = _1) then
-        exit
-      else
-        inc(P);
+    result := 0;
+    repeat
+      if result = Count then
+        break;
+      if (P^.Lo <> _0) then
+      begin
+next:   inc(P); // most common case
+        inc(result);
+        continue;
+      end;
+      if P^.Hi = _1 then
+        exit; // found
+      goto next;
+    until false;
   end;
   result := -1; // not found
 end;
 
-function Hash256Index(P: PHash256Rec; Count: integer; h: PHash256Rec): integer;
+function Hash256Index(P: PHash256Rec; Count: PtrInt; h: PHash256Rec): PtrInt;
 var
-  _0, _1: PtrInt;
+  _0, _1, _2: PtrInt;
 begin
   if P <> nil then
   begin
     _0 := h^.d0;
     _1 := h^.d1;
-    for result := 0 to Count - 1 do
+    _2 := h^.d2;
+    h := pointer(h^.d3); // to reuse this register
+    result := 0;
+    repeat
+      if result = Count then
+        break;
       if (P^.d0 = _0) and
          (P^.d1 = _1) and
-         (P^.d2 = h^.d2) and
-         (P^.d3 = h^.d3) then
-        exit
-      else
-        inc(P);
+         (P^.d2 = _2) and
+         (pointer(P^.d3) = h) then
+         exit;
+      inc(P);
+      inc(result);
+    until false;
   end;
   result := -1; // not found
 end;
 
 {$else}
 
-function Hash128Index(P: PHash128Rec; Count: integer; h: PHash128Rec): integer;
+function Hash128Index(P: PHash128Rec; Count: PtrInt; h: PHash128Rec): PtrInt;
 begin
   if P <> nil then
     for result := 0 to Count - 1 do
@@ -8846,7 +8870,7 @@ begin
   result := -1; // not found
 end;
 
-function Hash256Index(P: PHash256Rec; Count: integer; h: PHash256Rec): integer;
+function Hash256Index(P: PHash256Rec; Count: PtrInt; h: PHash256Rec): PtrInt;
 begin
   if P <> nil then
     for result := 0 to Count - 1 do
@@ -9802,7 +9826,7 @@ begin
     while true do
       if ord(PW^) = 0 then
         break
-      else if ord(PW^) <= 127 then
+      else if ord(PW^) <= $7f then
         inc(PW)
       else // 7-bit chars are always OK, whatever codepage/charset is used
         exit;

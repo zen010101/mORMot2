@@ -152,7 +152,6 @@ function NeedsJsonEscape(P: PUtf8Char; PLen: integer): boolean; overload;
 // - P^ should point at 'u1234' just after \u1234
 // - return ending P position, maybe after another \u#### UTF-16 surrogate char
 function JsonUnicodeEscapeToUtf8(var D: PUtf8Char; P: PUtf8Char): PUtf8Char;
-//  {$ifdef HASINLINE}inline;{$endif}
 
 /// ensure all UTF-8 Unicode glyphs are escaped as \u#### UTF-16 JSON
 // - this will work at raw UTF-8 text level: if your input is true JSON,
@@ -637,12 +636,12 @@ function GotoFieldCountExpanded(P: PUtf8Char): PUtf8Char;
 /// low-level parsing of the first expanded JSON object to guess fields count
 function GetFieldCountExpanded(P: PUtf8Char): integer;
 
-/// fast Format() function replacement, handling % and ? parameters
+/// raw Format() function replacement, handling % and ? parameters
 // - call rather FormatSql() and FormatJson() wrappers instead
 // - resulting string has no length limit and uses fast concatenation
 // - any supplied TObject instance will be written as their class name
-procedure FormatParams(const Format: RawUtf8; const Args, Params: array of const;
-  JsonFormat: boolean; var Result: RawUtf8);
+procedure FormatParams(const Format: RawUtf8; Args, Params: PVarRecArray;
+  ArgsHigh, ParamsHigh: PtrInt; JsonFormat: boolean; var Result: RawUtf8);
 
 /// fast Format() function replacement, handling % but also ? inlined parameters
 // - will include Args[] for every % in Format
@@ -750,7 +749,7 @@ type
     procedure AddAnyAnsiString(const s: RawByteString; Escape: TTextWriterKind;
       CodePage: integer = -1);
       {$ifdef HASINLINE}inline;{$endif}
-    /// append some ANSI buffer as UTF-8, using a supplied CodePage
+    /// append some ANSI buffer as UTF-8, using a supplied CodePage and format
     // - if codepage is 0, the current CurrentAnsiConvert.CodePage would be used
     // - will use TSynAnsiConvert to perform the conversion to UTF-8
     procedure AddAnyAnsiBuffer(P: PAnsiChar; Len: PtrInt;
@@ -769,7 +768,7 @@ type
     /// append some values at once
     // - text values (e.g. RawUtf8) will be escaped as JSON by default
     procedure Add(const Values: array of const); overload;
-    /// append some values at once with custom escaping
+    /// append some values at once, according to the specified format
     procedure Add(const Values: array of const; Escape: TTextWriterKind); overload;
     /// append an array of RawUtf8 as CSV of JSON strings
     procedure AddCsvUtf8(const Values: array of RawUtf8);
@@ -786,6 +785,9 @@ type
     // - this overriden version will properly handle JSON escape
     // - % = #37 marks a string, integer, floating-point, or class parameter
     // to be appended as text (e.g. class name)
+    // - "" won't be added for string values, but they may be escaped, depending
+    // on the supplied Escape parameter - so if you use twJsonEscape the Format
+    // string is likely to include the quotes like '"%"'
     // - note that due to a limitation of the "array of const" format, cardinal
     // values should be type-casted to Int64() - otherwise the integer mapped
     // value will be transmitted, therefore wrongly
@@ -872,7 +874,7 @@ type
     // than specifying Len>0 if you are sure P is zero-ended - e.g. from RawUtf8)
     procedure AddJsonEscape(P: pointer; Len: PtrInt = 0); overload;
     /// append some UTF-16 buffer, with proper JSON escaping
-    procedure AddJsonEscapeW(P: PWord; Len: PtrInt); overload;
+    procedure AddJsonEscapeW(P: PWord; Len: PtrUInt); overload;
     /// append some #0-ended UTF-16 buffer, with proper JSON escaping
     // - slightly faster then the overload with a Len
     procedure AddJsonEscapeW(P: PWord); overload;
@@ -908,12 +910,13 @@ type
     // - i.e. \u#### patterns will be converted into pure UTF-8 output
     // - as used for jsonNoEscapeUnicode transformation
     procedure AddNoJsonEscapeForcedNoUnicode(P: PUtf8Char; Len: PtrInt);
-    /// append an open array constant value as UTF-8
+    /// append an open array constant value as UTF-8, according to the specified format
     // - "" won't be added for string values, but they may be escaped, depending
-    // on the supplied Escape parameter
+    // on the supplied Escape parameter - so if you use twJsonEscape the Format
+    // string is likely to include the quotes like '"%"'
     // - very fast (avoid most temporary storage)
-    procedure AddVarRec(V: PVarRec; Escape: TTextWriterKind = twNone;
-      WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); override;
+    procedure AddVarRec(V: PVarRec; Escape: TTextWriterKind;
+      WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); overload;
     /// encode the supplied data as an UTF-8 valid JSON object content
     // - data must be supplied two by two, as Name,Value pairs, e.g.
     // ! aWriter.AddJsonEscape(['name','John','year',1972]);
@@ -957,6 +960,8 @@ type
     // - is the reverse of the JsonObjectAsJsonArrays() function
     // - used e.g. by TSynDictionary.SaveToJson
     procedure AddJsonArraysAsJsonObject(keys, values: PUtf8Char);
+    /// append an open array constant value as UTF-8, with SQL :(...): inlining
+    procedure AddSqlInlinedVarRec(V: PVarRec);
   end;
   /// meta-class of TJsonWriter
   TJsonWriterClass = class of TJsonWriter;
@@ -1080,7 +1085,7 @@ type
       out aEnum; aEnumDefault: PtrUInt = 0): boolean; overload;
     /// returns all values, as CSV or INI content
     function AsCsv(const KeySeparator: RawUtf8 = '=';
-      const ValueSeparator: RawUtf8 = #13#10; const IgnoreKey: RawUtf8 = ''): RawUtf8;
+      const ValueSeparator: RawUtf8 = EOL; const IgnoreKey: RawUtf8 = ''): RawUtf8;
     /// returns all values as a JSON object of string fields
     function AsJson: RawUtf8;
     /// fill the supplied two arrays of RawUtf8 with the stored values
@@ -2759,9 +2764,8 @@ end;
 function JsonUnicodeEscapeToUtf8(var D: PUtf8Char;  P: PUtf8Char): PUtf8Char;
 var
   c, s: cardinal;
-begin
-  // P^ points at 'u1234' just after \u0123
-  c := HexToWideChar(P + 1);
+begin // inlined version of Utf16HiCharToUtf8() with proper \uxxxx hexa decoding
+  c := HexToWideChar(P + 1); // P^ points at 'u1234' just after \u1234
   if c <= $7f then
     if c >= 32 then
       D^ := AnsiChar(c)
@@ -2769,46 +2773,35 @@ begin
       D^ := '?' // \u0000 is an invalid value (at least in our framework)
     else
     begin
-      PInt64(D)^ := PInt64(P - 1)^; // control chars should always be escaped
+      PInt64(D)^ := PInt64(P - 1)^; // #1..#31 control chars should be escaped
       inc(D, 5);
     end
   else if c < $7ff then
   begin
-    D[0] := AnsiChar($C0 or (c shr 6));
-    D[1] := AnsiChar($80 or (c and $3F));
+    PWord(D)^ := (c shr 6) or ((c and $3f) shl 8) or UTF8_7FF;
     inc(D);
   end
-  else if (c >= UTF16_HISURROGATE_MIN) and  // decode from two UTF-16 surrogates
-          (c <= UTF16_LOSURROGATE_MAX) then
-    if PWord(P + 5)^ = ord('\') + ord('u') shl 8 then
-    begin
-      s := HexToWideChar(P + 7);
-      if s = 0 then
-        D^ := '?' // invalid surrogate
-      else
-      begin
-        case c of // inlined Utf16CharToUtf8()
-          UTF16_HISURROGATE_MIN..UTF16_HISURROGATE_MAX:
-            c := ((c - UTF16_SURROGATE_OFFSET) shl 10) or
-                 (s xor UTF16_LOSURROGATE_MIN);
-          UTF16_LOSURROGATE_MIN..UTF16_LOSURROGATE_MAX:
-            c := ((s - UTF16_SURROGATE_OFFSET) shl 10) or
-                 (c xor UTF16_LOSURROGATE_MIN);
-        end;
-        inc(D, Ucs4ToUtf8(c, D));
-        result := P + 11;
-        exit;
-      end;
-    end
-    else
-      D^ := '?' // the first \u#### expects a following \u#### surrogate
-  else
+  else if (c < UTF16_HISURROGATE_MIN) or
+          (c > UTF16_LOSURROGATE_MAX) then
+  begin // $800..xxx but excluding $d800..$dfff UTF-16 surrogates
+    PCardinal(D)^ := (c shr 12) or (((c shr 6) and $3f) shl 8) or
+                     ((c and $3f) shl 16) or UTF8_FFFF;
+    inc(D, 2);
+  end
+  else if PWord(P + 5)^ = ord('\') + ord('u') shl 8 then // 2nd UTF-16 surrogate
   begin
-    D[0] := AnsiChar($e0 or (c shr 12));
-    D[1] := AnsiChar($80 or ((c shr 6) and $3f));
-    D[2] := AnsiChar($80 or (c and $3f));
-    inc(D,2);
-  end;
+    s := HexToWideChar(P + 7);
+    if s = 0 then
+      D^ := '?' // invalid surrogate
+    else
+    begin
+      inc(D, Utf16SurrogateToUtf8(D, c, s));
+      result := P + 11;
+      exit;
+    end;
+  end
+  else
+    D^ := '?'; // the first \u#### expects a following \u#### surrogate
   inc(D);
   result := P + 5;
 end;
@@ -3454,7 +3447,7 @@ end;
 procedure TGetJsonField.GetJsonField;
 var
   P, D: PUtf8Char;
-  c4, surrogate, extra: PtrUInt;
+  c1, c2: PtrUInt;
   c: AnsiChar;
   {$ifdef CPUX86NOTPIC}
   tab: TJsonCharSet absolute JSON_CHARS; // not enough registers
@@ -3543,77 +3536,61 @@ begin // see http://www.ietf.org/rfc/rfc4627.txt
             exit; // avoid \#0 potential buffer overflow issue or control char
           // JSON_UNESCAPE_UTF16: decode '\u0123' UTF-16 into UTF-8
           // (inlined JsonUnicodeEscapeToUtf8() to optimize GetJsonField)
-          c4 := (ConvertHexToBin[P[1]] shl 12) or
+          c1 := (ConvertHexToBin[P[1]] shl 12) or
                 (ConvertHexToBin[P[2]] shl 8) or
                 (ConvertHexToBin[P[3]] shl 4) or
                  ConvertHexToBin[P[4]]; // optimistic conversion (no check)
           inc(P, 5);
-          case c4 of
-            0: // \u0000 is an invalid value (at least in our framework)
-              begin
-                D^ := '?';
-                inc(D);
-              end;
-            1..$7f:
-              begin
-                D^ := AnsiChar(c4);
-                inc(D);
-              end;
-            $80..$7ff:
-              begin
-                D[0] := AnsiChar($C0 or (c4 shr 6));
-                D[1] := AnsiChar($80 or (c4 and $3F));
-                inc(D, 2);
-              end;
-            UTF16_HISURROGATE_MIN..UTF16_LOSURROGATE_MAX:
-              if PWord(P)^ = ord('\') + ord('u') shl 8 then
-              begin
-                inc(P);
-                surrogate := (ConvertHexToBin[P[1]] shl 12) or
-                             (ConvertHexToBin[P[2]] shl 8) or
-                             (ConvertHexToBin[P[3]] shl 4) or
-                              ConvertHexToBin[P[4]];
-                case c4 of // inlined Utf16CharToUtf8()
-                  UTF16_HISURROGATE_MIN..UTF16_HISURROGATE_MAX:
-                    c4 := ((c4 - UTF16_SURROGATE_OFFSET) shl 10) or
-                          (surrogate xor UTF16_LOSURROGATE_MIN);
-                  UTF16_LOSURROGATE_MIN..UTF16_LOSURROGATE_MAX:
-                    c4 := ((surrogate - UTF16_SURROGATE_OFFSET) shl 10) or
-                          (c4 xor UTF16_LOSURROGATE_MIN);
-                end;
-                if c4 <= $7ff then
-                  c := #2
-                else if c4 <= $ffff then
-                  c := #3
-                else if c4 <= $1fffff then
-                  c := #4
-                else if c4 <= $3ffffff then
-                  c := #5
-                else
-                  c := #6;
-                extra := ord(c) - 1;
-                repeat
-                  D[extra] := AnsiChar((c4 and $3f) or $80);
-                  c4 := c4 shr 6;
-                  dec(extra);
-                until extra = 0;
-                D^ := AnsiChar(byte(c4) or UTF8_TABLE.FirstByte[ord(c)]);
-                inc(D, ord(c));
-                inc(P, 5);
-              end
-              else
-              begin
-                // unexpected surrogate without its pair
-                D^ := '?';
-                inc(D);
-              end;
-          else
+          if c1 <= $7f then
+            if c1 <> 0 then
             begin
-              D[0] := AnsiChar($e0 or (c4 shr 12));
-              D[1] := AnsiChar($80 or ((c4 shr 6) and $3f));
-              D[2] := AnsiChar($80 or (c4 and $3f));
-              inc(D, 3);
+              D^ := AnsiChar(c1); // e.g. \u0007
+              inc(D);
+            end
+            else
+            begin
+              D^ := '?'; // \u0000 is an invalid value (at least in our framework)
+              inc(D);
+            end
+          else if c1 <= $7ff then
+          begin
+            PWord(D)^ := (c1 shr 6) or ((c1 and $3f) shl 8) or UTF8_7FF;
+            inc(D, 2);
+          end
+          else if (c1 < UTF16_HISURROGATE_MIN) or
+                  (c1 > UTF16_LOSURROGATE_MAX) then
+          begin // $800..$ffff but excluding $d800..$dfff UTF-16 surrogates
+            PCardinal(D)^ := (c1 shr 12) or (((c1 shr 6) and $3f) shl 8) or
+                             ((c1 and $3f) shl 16) or UTF8_FFFF;
+            inc(D, 3);
+          end
+          else
+          begin
+            if PWord(P)^ = ord('\') + ord('u') shl 8 then
+            begin
+              c2 := (ConvertHexToBin[P[2]] shl 12) or // 2nd UTF-16 surrogate
+                    (ConvertHexToBin[P[3]] shl 8) or
+                    (ConvertHexToBin[P[4]] shl 4) or
+                     ConvertHexToBin[P[5]];
+              if c1 <= UTF16_HISURROGATE_MAX then // inlined Utf16SurrogateToUtf8()
+                c1 := ((c1 - UTF16_SURROGATE_OFFSET) shl 10) or
+                      (c2 xor UTF16_LOSURROGATE_MIN)
+              else
+                c1 := ((c2 - UTF16_SURROGATE_OFFSET) shl 10) or
+                      (c1 xor UTF16_LOSURROGATE_MIN);
+              if (c1 >= UTF16_SURROGATE_MIN) and
+                 (c1 <= UTF16_SURROGATE_MAX) then // in U+10000 to U+10FFFF range
+              begin
+                PCardinal(D)^ := (c1 shr 18) or (((c1 shr 12) and $3f) shl 8) or
+                  (((c1 shr 6) and $3f) shl 16) or ((c1 and $3f) shl 24) or UTF8_10FF;
+                inc(D, 4);
+                inc(P, 6);
+                continue;
+              end;
             end;
+            inc(P);
+            D^ := '?'; // unexpected surrogate without its pair or invalid range
+            inc(D);
           end;
         until false;
         // here P^='"'
@@ -5014,113 +4991,91 @@ begin
   until false;
 end;
 
-procedure FormatParams(const Format: RawUtf8; const Args, Params: array of const;
-  JsonFormat: boolean; var Result: RawUtf8);
+procedure FormatWithParams(W: TJsonWriter; F: PUtf8Char;
+  pa, ea, pp, ep: PVarRec; JsonFormat: boolean);
 var
-  A, P: PtrInt;
-  F, FDeb: PUtf8Char;
-  isParam: AnsiChar;
-  tmp: TTempUtf8;
-  wasString: boolean;
-  pa: PVarRec;
+  l: PtrInt;
+begin
+  repeat
+    l := 0;
+    while not (F[l] in [#0, '%', '?']) do
+      inc(l);
+    W.AddNoJsonEscape(F, l); // plain text between % ? markers
+    inc(F, l);
+    if F^ = #0 then
+      exit
+    else if F^ = '%' then
+    begin
+      if PtrUInt(pa) > PtrUInt(ea) then
+        break; // can't handle % substitution
+      W.AddVarRec(pa);
+      inc(pa);
+    end
+    else // F^ = '?'
+    begin
+      if PtrUInt(pp) > PtrUInt(ep) then
+        break; // can't handle ? substitution as JSON or SQL
+      if JsonFormat then
+        W.AddJsonEscapeVarRec(pp) // proper JSON including "quotes"
+      else
+        W.AddSqlInlinedVarRec(pp);
+      inc(pp);
+    end;
+    inc(F);
+    if F^ = #0 then
+      exit;
+  until false;
+  // no more available Args or Params -> add all remaining text
+  W.AddNoJsonEscape(F + 1);
+end;
+
+procedure FormatParams(const Format: RawUtf8; Args, Params: PVarRecArray;
+  ArgsHigh, ParamsHigh: PtrInt; JsonFormat: boolean; var Result: RawUtf8);
+var
+  W: TJsonWriter;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if (Format = '') or
-     ((high(Args) < 0) and
-      (high(Params) < 0)) then
+     ((ArgsHigh < 0) and
+      (ParamsHigh < 0)) then
     // no formatting to process, but may be a const
     // -> make unique since e.g. _JsonFmt() will parse it in-place
     FastSetString(Result, pointer(Format), length(Format))
-  else if high(Params) < 0 then
-    // faster function with no ?
-    FormatUtf8(Format, Args, Result)
   else if Format = '%' then
-    // optimize raw conversion
-    VarRecToUtf8(@Args[0], Result)
+    VarRecToUtf8(pointer(Args), Result) // optimize raw conversion
+  else if ParamsHigh < 0 then
+    FormatUtf8Raw(Format, pointer(Args), ArgsHigh + 1, Result, temp) // = FormatUtf8()
   else
+  begin
     // handle any number of parameters with minimal memory allocations
-    with TJsonWriter.CreateOwnedStream(temp) do
+    W := TJsonWriter.CreateOwnedStream(temp);
     try
-      A := 0;
-      P := 0;
-      F := pointer(Format);
-      while F^ <> #0 do
-      begin
-        if (F^ <> '%') and
-           (F^ <> '?') then
-        begin
-          // handle plain text between % ? markers
-          FDeb := F;
-          repeat
-            inc(F);
-          until F^ in [#0, '%', '?'];
-          AddNoJsonEscape(FDeb, F - FDeb);
-          if F^ = #0 then
-            break;
-        end;
-        isParam := F^;
-        inc(F); // jump '%' or '?'
-        if (isParam = '%') and
-           (A <= high(Args)) then
-        begin
-          // handle % substitution
-          pa := @Args[A];
-          if pa^.VType = vtObject then
-            AddShort(ClassNameShort(pa^.VObject)^)
-          else
-            AddVarRec(pa);
-          inc(A);
-        end
-        else if (isParam = '?') and
-                (P <= high(Params)) then
-        begin
-          // handle ? substitution as JSON or SQL
-          pa := @Params[P];
-          if JsonFormat then
-            AddJsonEscapeVarRec(pa) // proper JSON including "quotes"
-          else
-          begin
-            AddDirect(':', '('); // markup for SQL parameter binding
-            VarRecToTempUtf8(pa, tmp, @wasString);
-            if wasString then
-              AddQuotedStr(tmp.Text, tmp.Len, '''') // SQL quote
-            else
-              AddShort(tmp.Text, tmp.Len); // numbers
-            TempUtf8Done(tmp);
-            AddDirect(')', ':');
-          end;
-          inc(P);
-        end
-        else
-        begin
-          // no more available Args or Params -> add all remaining text
-          AddNoJsonEscape(F, length(Format) - (F - pointer(Format)));
-          break;
-        end;
-      end;
-      SetText(Result);
+      FormatWithParams(W, pointer(Format), pointer(Args), @Args[ArgsHigh],
+        pointer(Params), @Params[ParamsHigh], JsonFormat);
+      W.SetText(Result);
     finally
-      Free;
+      W.Free;
     end;
+  end;
 end;
 
 function FormatSql(const Format: RawUtf8;
   const Args, Params: array of const): RawUtf8;
 begin
-  FormatParams(Format, Args, Params, {json=}false, result);
+  FormatParams(Format, @Args[0], @Params[0], high(Args), high(Params), {json=}false, result);
 end;
 
 function FormatJson(const Format: RawUtf8;
   const Args, Params: array of const): RawUtf8;
 begin
-  FormatParams(Format, Args, Params, {json=}true, result);
+  FormatParams(Format, @Args[0], @Params[0], high(Args), high(Params), {json=}true, result);
 end;
 
 {$ifndef PUREMORMOT2}
 function FormatUtf8(const Format: RawUtf8; const Args, Params: array of const;
   JsonFormat: boolean): RawUtf8;
 begin
-  FormatParams(Format, Args, Params, JsonFormat, result);
+  FormatParams(Format, @Args[0], @Params[0], high(Args), high(Params), JsonFormat, result);
 end;
 {$endif PUREMORMOT2}
 
@@ -5347,7 +5302,7 @@ end;
 procedure _JS_WideChar(Data: PWord; const Ctxt: TJsonSaveContext);
 begin
   Ctxt.W.Add('"');
-  if Data^ <> 0 then
+  if Data^ <> 0 then // #0 will be serialized as ""
     Ctxt.W.AddJsonEscapeW(Data, 1);
   Ctxt.W.AddDirect('"');
 end;
@@ -6302,51 +6257,46 @@ end;
 procedure _JsonFixed(W: TJsonWriter; P: PByte; AnsiToWide: PWordArray);
 var
   c: cardinal;
-  d: PByteArray;
 begin // a dedicated method using a TSynAnsiFixedWidth lookup table
   dec(P);
   repeat
     inc(P);
     if W.B >= W.BEnd then
       W.FlushToStream;
-    case JSON_ESCAPE[P^] of // better codegen with no temp var
-      JSON_ESCAPE_NONE: // no escape needed (most common case)
-        begin
-          inc(W.B);
-          d := pointer(W.B);
-          if P^ <= $7f then
-            d[0] := P^
-          else
-          begin
-            c := AnsiToWide[P^]; // convert FixedAnsi char into Unicode char
-            if c > $7ff then
-            begin
-              d[0] := $e0 or (c shr 12);
-              d[1] := $80 or ((c shr 6) and $3f);
-              d[2] := $80 or (c and $3f);
-              inc(W.B, 2);
-            end
-            else
-            begin
-              d[0] := $c0 or (c shr 6);
-              d[1] := $80 or (c and $3f);
-              inc(W.B);
-            end;
-          end;
-        end;
-      JSON_ESCAPE_ENDINGZERO: // #0
-        exit;
-      JSON_ESCAPE_UNICODEHEX: // e.g. #7 -> \u0007
-        begin
-          PCardinal(W.B + 1)^ := JSON_UHEXC;
-          PCardinal(W.B + 5)^ := TwoDigitsHex[P^];
-          inc(W.B, 6);
-        end;
-    else // escaped as \ + b,t,n,f,r,\,"
+    c := JSON_ESCAPE[P^];
+    if c = JSON_ESCAPE_NONE then // no escape needed (most common case)
+    begin
+      inc(W.B);
+      if P^ <= $7f then // cut-down dedicated version of Utf16HiCharToUtf8()
+        W.B^ := AnsiChar(P^)
+      else
       begin
-        PCardinal(W.B + 1)^ := (cardinal(JSON_ESCAPE[P^]) shl 8) or byte('\');
-        inc(W.B, 2);
+        c := AnsiToWide[P^]; // convert FixedAnsi char into Unicode char
+        if c <= $7ff then
+        begin
+          PWord(W.B)^ := (c shr 6) or ((c and $3f) shl 8) or UTF8_7FF;
+          inc(W.B);
+        end
+        else
+        begin
+          PCardinal(W.B)^ := (c shr 12) or (((c shr 6) and $3f) shl 8) or
+                             ((c and $3f) shl 16) or UTF8_FFFF;
+          inc(W.B, 2);
+        end;
       end;
+    end
+    else if c = JSON_ESCAPE_ENDINGZERO then // #0
+        exit
+    else if c = JSON_ESCAPE_UNICODEHEX then // e.g. #7 -> \u0007
+      begin
+        PCardinal(W.B + 1)^ := JSON_UHEXC;
+        PCardinal(W.B + 5)^ := TwoDigitsHex[P^];
+        inc(W.B, 6);
+      end
+    else // escaped as \ + b,t,n,f,r,\,"
+    begin
+      PCardinal(W.B + 1)^ := (c shl 8) or byte('\');
+      inc(W.B, 2);
     end;
   until false;
 end;
@@ -6527,7 +6477,11 @@ begin
     inc(Format);
     if ValuesCount <= 0 then
       continue; // missing value will display nothing
-    AddVarRec(Values, Escape, WriteObjectOptions);
+    if (Escape = twNone) or
+       (byte(Values^.VType) in vtNotString) then
+      AddVarRec(Values)
+    else
+      AddVarRec(Values, Escape, WriteObjectOptions);
     if Format^ = #0 then
       exit;
     inc(Values);
@@ -6594,11 +6548,18 @@ begin
   if n = 0 then
     exit;
   a := @Values[0];
-  repeat
-    AddVarRec(a);
-    inc(a);
-    dec(n);
-  until n = 0;
+  if Escape = twNone then
+    repeat
+      AddVarRec(a);
+      inc(a);
+      dec(n);
+    until n = 0
+  else
+    repeat
+      AddVarRec(a, Escape);
+      inc(a);
+      dec(n);
+    until n = 0;
 end;
 
 procedure TJsonWriter.AddQuotedStringAsJson(const QuotedString: RawUtf8);
@@ -7157,47 +7118,51 @@ begin
   AddAnyAnsiString(s, twJsonEscape, 0);
 end;
 
-procedure TJsonWriter.AddJsonEscapeW(P: PWord; Len: PtrInt);
+procedure TJsonWriter.AddJsonEscapeW(P: PWord; Len: PtrUInt);
 var
-  i, c, s: PtrInt;
+  c, t: cardinal;
   tab: PByteArray;
 begin // called with Len=1 for WideChar, or from some DB raw UTF-16 buffers
-  if P = nil then
+  if (P = nil) or
+     (PtrInt(Len) <= 0) then
     exit;
-  i := 0;
-  while i < Len do
-  begin
-    s := i;
-    tab := @JSON_ESCAPE; // better code generation on FPC within the loop
-    repeat
-      c := PWordArray(P)[i];
-      if (c <= 127) and
-         (tab[c] <> JSON_ESCAPE_NONE) then
-        break;
-      inc(i);
-    until i >= Len;
-    if i <> s then
-      AddNoJsonEscapeW(@PWordArray(P)[s], i - s)
-    else if B >= BEnd then
-      FlushToStream; // for safe AddDirect() below
-    if i >= Len then
-      exit;
-    c := PWordArray(P)[i];
-    if c = 0 then
-      exit;
-    inc(i);
-    if tab[c] = JSON_ESCAPE_UNICODEHEX then // e.g. #7 -> \u0007
+  tab := @JSON_ESCAPE;
+  Len := PtrUInt(P) + Len * 2;
+  repeat
+    if B > BEnd then // no better codegen with a local "dst: PUtf8Char" variable
+      FlushToStream;
+    c := P^;
+    inc(P);
+    if c <= $7f then
     begin
-      PCardinal(B + 1)^ := JSON_UHEXC;
-      PCardinal(B + 5)^ := TwoDigitsHex[c];
-      inc(B, 6);
+      t := tab[c];
+      if t = JSON_ESCAPE_NONE then // optimized for the most common case
+      begin
+        inc(B);
+        B^ := AnsiChar(c);
+        if PtrUInt(P) >= Len then
+          break;
+        continue;
+      end
+      else if t = JSON_ESCAPE_ENDINGZERO then // final #0
+        break
+      else if t = JSON_ESCAPE_UNICODEHEX then // e.g. #7 -> \u0007
+      begin
+        PCardinal(B + 1)^     := JSON_UHEXC;
+        PCardinal(B + 5)^ := TwoDigitsHex[c];
+        inc(B, 6);
+      end
+      else
+      begin // escaped as \ + b,t,n,f,r,\,"
+        PCardinal(B + 1)^ := (t shl 8) or byte('\');
+        inc(B, 2);
+      end
     end
     else
-    begin // escaped as \ + b,t,n,f,r,\,"
-      PCardinal(B + 1)^ := (cardinal(tab[c]) shl 8) or byte('\');
-      inc(B, 2);
-    end;
-  end;
+      inc(B, Utf16HiCharToUtf8(B + 1, c, P)); // handle UTF-16 surrogates
+    if PtrUInt(P) >= Len then
+      break;
+  until false;
 end;
 
 procedure TJsonWriter.AddJsonEscapeW(P: PWord);
@@ -7206,7 +7171,7 @@ var
   dst: PUtf8Char;
   tab: PByteArray;
   c: PtrInt;
-begin
+begin // most used overload, slightly faster than the previous with Len
   src := P;
   if src = nil then
     exit;
@@ -7217,22 +7182,22 @@ begin
   repeat
     repeat
       c := src^;
-      if c <= 127 then
+      inc(src);
+      if c <= $7f then
       begin
         if tab[c] <> JSON_ESCAPE_NONE then
           break; // also stop at JSON_ESCAPE_ENDINGZERO
         dst^ := AnsiChar(c); // direct store 7-bit ASCII
         inc(dst);
-        inc(src);
-        if dst <= BEnd then
+        if dst < BEnd then
           continue;
       end
       else
       begin
-        P := src;
-        inc(dst, Utf16CharToUtf8(dst, P)); // convert UTF-16 to UTF-8
+        P := src; // need a pointer variable for surrogates
+        inc(dst, Utf16HiCharToUtf8(dst, c, P)); // convert UTF-16 to UTF-8
         src := P;
-        if dst <= BEnd then
+        if dst < BEnd then
           continue;
       end;
       dst := FlushToStreamUsing(dst);
@@ -7250,8 +7215,7 @@ begin
       PCardinal(dst)^ := (cardinal(tab[c]) shl 8) or byte('\');
       inc(dst, 2);
     end;
-    inc(src);
-    if dst > BEnd then
+    if dst >= BEnd then
       dst := FlushToStreamUsing(dst);
   until false;
   B := dst - 1;
@@ -7260,16 +7224,12 @@ end;
 procedure TJsonWriter.AddJsonEscapeVarRec(V: PVarRec);
 begin
   case V^.VType of
-    vtPointer: // see VarRecToVariant()
-      if V^.VPointer = nil then
-        AddShort(NULL_LOW, 4)
-      else // raw pointer <> nil will be serialized as PtrInt
-        Add(PtrInt(V^.VPointer));
+    vtBoolean:
+      Add(V^.VBoolean); // 'true'/'false' - AddVarRec() would store 1/0
     vtString:
       begin
         Add('"');
-        if (V^.VString <> nil) and
-           (V^.VString^[0] <> #0) then
+        if V^.VString^[0] <> #0 then
           AddJsonEscape(@V^.VString^[1], ord(V^.VString^[0]));
         AddDirect('"');
       end;
@@ -7314,30 +7274,18 @@ begin
         AddClassName(V^.VClass);
         AddDirect('"');
       end;
-    vtBoolean:
-      Add(V^.VBoolean); // 'true'/'false'
-    vtInteger:
-      Add(V^.VInteger);
-    vtInt64:
-      Add(V^.VInt64^);
-    {$ifdef FPC}
-    vtQWord:
-      AddQ(V^.VQWord^);
-    {$endif FPC}
-    vtExtended:
-      AddDouble(V^.VExtended^);
-    vtCurrency:
-      AddCurr64(V^.VInt64);
     vtObject:
       WriteObject(V^.VObject);
     vtVariant:
       AddVariant(V^.VVariant^, twJsonEscape);
+  else
+    AddVarRec(V); // numbers need no JSON escape
   end;
 end;
 
 procedure TJsonWriter.AddJsonEscape(Source: TJsonWriter);
 begin
-  if Source.fTotalFileSize = 0 then
+  if Source.WrittenBytes = 0 then // nothing written in Source.Stream yet
     AddJsonEscape(Source.fTempBuf, Source.B - Source.fTempBuf + 1)
   else
     AddJsonEscape(pointer(Source.Text));
@@ -7345,7 +7293,7 @@ end;
 
 procedure TJsonWriter.AddNoJsonEscape(Source: TJsonWriter);
 begin
-  if Source.fTotalFileSize = 0 then
+  if Source.WrittenBytes = 0 then
     AddNoJsonEscapeBig(Source.fTempBuf, Source.B - Source.fTempBuf + 1)
   else
     AddString(Source.Text);
@@ -7459,15 +7407,9 @@ procedure TJsonWriter.AddVarRec(V: PVarRec; Escape: TTextWriterKind;
   WriteObjectOptions: TTextWriterWriteObjectOptions);
 var
   tmp: cardinal;
-begin
+  ps: PByteArray;
+begin // note: no quotes for strings, since "%" should be used in the Format
   case V^.VType of // use efficient jmp table
-    vtInteger:
-      Add(V^.VInteger);
-    vtBoolean:
-      if V^.VBoolean then // normalize
-        Add('1')
-      else
-        Add('0');
     vtChar:
       Add(@V^.VChar, 1, Escape);
     vtWideChar:
@@ -7475,34 +7417,18 @@ begin
         tmp := ord(V^.VWideChar); // ensure has one ending #0
         AddW(@tmp, Escape);
       end;
-    vtExtended:
-      AddDouble(V^.VExtended^);
-    vtCurrency:
-      AddCurr64(V^.VInt64);
-    vtInt64:
-      Add(V^.VInt64^);
-    {$ifdef FPC}
-    vtQWord:
-      AddQ(V^.VQWord^);
-    {$endif FPC}
     vtVariant:
       AddVariant(V^.VVariant^, Escape);
     vtString:
-      if (V^.VString <> nil) and
-         (V^.VString^[0] <> #0) then
-        Add(@V^.VString^[1], ord(V^.VString^[0]), Escape);
-    vtPointer,
-    vtInterface:
-      if V^.VPointer = nil then
-        AddShort(NULL_LOW, 4)
-      else
-        Add(PtrInt(V^.VPointer)); // as VarRecToVariant()
+      begin
+        ps := v^.VPointer;
+        if ps[0] <> 0 then
+          Add(@ps[1], ord(ps[0]), Escape);
+      end;
     vtPChar:
       Add(PUtf8Char(V^.VPChar), Escape);
     vtObject:
       WriteObject(V^.VObject, WriteObjectOptions);
-    vtClass:
-      AddClassName(V^.VClass);
     vtAnsiString:
       if V^.VAnsiString <> nil then // expect RawUtf8
         case Escape of
@@ -7511,7 +7437,7 @@ begin
           twJsonEscape:
             AddJsonEscape(V^.VAnsiString, 0); // faster with no len
           twOnSameLine:
-            AddOnSameLine(V^.VAnsiString); // faster with no len
+            AddOnSameLine(V^.VAnsiString);    // faster with no len
         end;
     vtPWideChar,
     {$ifdef HASVARUSTRING}
@@ -7520,6 +7446,8 @@ begin
     vtWideString:
       if V^.VWideString <> nil then
         AddW(V^.VWideString, Escape);
+  else
+    AddVarRec(V); // numbers need no Escape
   end;
 end;
 
@@ -7693,6 +7621,21 @@ begin
   temp.InitRtti(Info, Value^);
   AddDynArrayJson(temp, WriteOptions);
   result := temp.Info.Cache.ItemSize;
+end;
+
+procedure TJsonWriter.AddSqlInlinedVarRec(V: PVarRec);
+var
+  wasString: boolean;
+  tmp: TTempUtf8;
+begin
+  Add(':', '('); // markup for SQL parameter binding
+  VarRecToTempUtf8(V, tmp, @wasString);
+  if wasString then
+    AddQuotedStr(tmp.Text, tmp.Len, '''') // SQL quote
+  else
+    AddShort(tmp.Text, tmp.Len); // numbers
+  TempUtf8Done(tmp);
+  AddDirect(')', ':');
 end;
 
 

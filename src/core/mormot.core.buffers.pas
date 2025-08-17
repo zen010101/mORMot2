@@ -6617,7 +6617,7 @@ begin
   begin
     Base64EncodeLoop(p, sp, PERLINE, @b64enc); // better inlining than AVX2 here
     inc(sp, PERLINE);
-    PWord(p + 64)^ := CRLFW; // CR + LF on all systems for safety
+    PWord(p + 64)^ := EOLW; // CR + LF on all systems for safety
     inc(p, 66);
     dec(len, PERLINE);
   end;
@@ -6635,7 +6635,7 @@ begin
       Base64EncodeTrailing(p, sp, len); // 1/2 bytes as 4 chars with trailing =
       inc(p, 4);
     end;
-    PWord(p)^ := CRLFW;
+    PWord(p)^ := EOLW;
     inc(p, 2);
   end;
   if Suffix <> '' then
@@ -8077,8 +8077,8 @@ begin
   if (Text = nil) or
      (W = nil) then
     exit;
-  TextLen := TextLen * 3; // worse case
-  if TextLen > W.BEnd - W.B then // need to compute exact length (very unlikely)
+  TextLen := TextLen * 3; // worse case would fit most of the time
+  if TextLen > W.BEnd - W.B then // need to compute exact length (seldom needed)
     TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
   inc(W.B, _UrlEncode_Write(Text, W.AddPrepare(TextLen), @TEXT_BYTES, space2plus));
 end;
@@ -8229,9 +8229,9 @@ begin
         w.AddString(name);
         w.AddDirect('=');
         if valueDirect in flags then
-          w.AddVarRec(p) // requires TJsonWriter
+          w.AddVarRec(p) // direct vtNotString numbers writing
         else
-          _UrlEncodeW(w, pointer(value), length(value), 32); // = UrlEncode(W)
+          _UrlEncodeW(w, pointer(value), length(value), 32); // need UrlEncode()
       end;
     w.SetText(result);
   finally
@@ -10631,7 +10631,7 @@ begin
   if tweItalic in st then
     Toggle(tweItalic);
   if P <> nil then
-    if PWord(P)^ = CRLFW then
+    if PWord(P)^ = EOLW then
       inc(P, 2)
     else
       inc(P);
@@ -10731,7 +10731,7 @@ begin
 none:     if lst = twlParagraph then
           begin
             c := PWord(P)^; // detect blank line to separate paragraphs
-            if c = CRLFW then
+            if c = EOLW then
               inc(P, 2)
             else if c and $ff = $0a then
               inc(P)
@@ -10815,7 +10815,7 @@ begin
         break
       else
       begin
-        if PWord(P)^ = CRLFW then
+        if PWord(P)^ = EOLW then
           inc(P, 2)
         else
           inc(P);

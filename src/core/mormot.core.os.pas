@@ -52,7 +52,7 @@ type
 
 const
   {$ifdef OSWINDOWS}
-  /// operating-system dependent Line Feed characters (#13#10 or #10)
+  /// operating-system dependent Line Feed characters (#13#10 on Windows)
   CRLF = #13#10;
   /// operating-system dependent wildchar to match all files in a folder
   FILES_ALL = '*.*';
@@ -61,7 +61,7 @@ const
   /// operating-system dependent boolean if paths are case-insensitive
   PathCaseInsensitive = true;
   {$else}
-  /// operating-system dependent Line Feed characters
+  /// operating-system dependent Line Feed characters (#10 on POSIX)
   CRLF = #10;
   /// operating-system dependent wildchar to match all files in a folder
   FILES_ALL = '*';
@@ -70,8 +70,10 @@ const
   /// operating-system dependent boolean if paths are case-insensitive
   PathCaseInsensitive = false;
   {$endif OSWINDOWS}
+  /// system-independent CR+LF two chars, as used on Windows or HTTP headers
+  EOL = #13#10;
   /// system-independent CR+LF two chars, as 16-bit constant
-  CRLFW = $0a0d;
+  EOLW = $0a0d;
   /// convert a TLineFeed value into its UTF-8 text representation
   LINE_FEED: array[TLineFeed] of TShort3 = (CRLF, #10, #13#10);
 
@@ -3712,9 +3714,8 @@ function ConsoleReadBody: RawByteString;
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
 var
-  /// internal wrapper using the RTL by default
-  // - overriden by mormot.core.unicode on Delphi 7/2007 to handle surrogates
-  // - called if IsAnsiCompatibleW(P, Len) returned false
+  /// used by Win32PWideCharToUtf8() when IsAnsiCompatibleW(P, Len) = false
+  // - overriden by mormot.core.unicode for performance and Delphi 7/2007 fix
   DoWin32PWideCharToUtf8: procedure(P: PWideChar; Len: PtrInt; var res: RawUtf8);
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
@@ -5934,12 +5935,9 @@ begin
 end;
 
 function IsLocalHost(Host: PUtf8Char): boolean;
-var
-  c: cardinal;
 begin
-  c := PCardinal(Host)^;
-  result := (c = ord('1') + ord('2') shl 8 + ord('7') shl 16 + ord('.') shl 24) or
-            (c = ord(':') + ord(':') shl 8 + ord('1') shl 16); // c6Localhost
+  result := (PCardinal(Host)^ = HOST_127) or // also check for c6Localhost:
+            (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
 end;
 
 
@@ -11445,7 +11443,7 @@ begin
       '^':
         if not posix and
            (state * [sInSQ, sInDQ, sBslash] = []) then
-          if PWord(p)^ = CRLFW then
+          if PWord(p)^ = EOLW then
           begin
             inc(p, 2);
             continue;

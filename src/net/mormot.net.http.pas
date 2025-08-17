@@ -150,20 +150,24 @@ function KnownHttpHeader(P: PUtf8Char): THttpHeader;
 function AuthorizationBearer(const AuthToken: RawUtf8): RawUtf8;
 
 /// will remove most usual HTTP headers which are to be recomputed on sending
+// - trim=true would remove any space or CR/LF at the end of the result
 // - as used e.g. during TPublicRelay process from mormot.net.relay
 function PurgeHeaders(const headers: RawUtf8; trim: boolean = false;
   upIgnore: PPAnsiChar = nil): RawUtf8;
 
-/// search, copy and remove a given HTTP header
+/// search, copy and remove a given HTTP header as text or Int64
 // - FindNameValue() makes search + copy, but this function also REMOVES the header
 procedure ExtractHeader(var headers: RawUtf8; const upname: RawUtf8;
-  out res: RawUtf8);
+  extractText: PRawUtf8; extractInt: PInt64 = nil);
 
 /// retrieve a HTTP header text value from its case-insensitive name
 function GetHeader(const Headers, Name: RawUtf8; out Value: RawUtf8): boolean; overload;
 
 /// retrieve a HTTP header 64-bit integer value from its case-insensitive name
 function GetHeader(const Headers, Name: RawUtf8; out Value: Int64): boolean; overload;
+
+/// remove an HTTP header entry as specified by its name (e.g. 'Authorization')
+function DeleteHeader(const Headers, Name: RawUtf8): RawUtf8;
 
 /// 'HEAD' and 'OPTIONS' methods would be detected and return true
 // - will check only the first four chars for efficiency
@@ -2472,11 +2476,11 @@ begin
 {$endif CPUINTEL}
   result := hhUnknown;
   // standard headers are expected to be pure A-Z chars: fast lowercase search
-  // - or $20 makes conversion to a-z lowercase, and won't affect - / : chars
+  // - "or $20" makes conversion to a-z lowercase, and won't affect - / : chars
   // - the worse case may be some false positive, which won't hurt unless
   // your network architecture suffers from HTTP request smuggling
   // - much less readable than cascaded IdemPPChar(), but O(1) efficiency for
-  // this very sensitive parsing function
+  // this very performance sensitive process
   case PCardinal(P)^ or mask_lower of
     // 'CONTENT-'
     ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('t') shl 24:
@@ -2633,58 +2637,64 @@ const
 
 function PurgeHeaders(const headers: RawUtf8; trim: boolean; upIgnore: PPAnsiChar): RawUtf8;
 var
-  pos, len: array[byte] of word;
+  pos, len: array[byte] of word; // delete up to 255 entries
   n, purged, i, l, tot: PtrInt;
-  P, next: PUtf8Char;
+  P, next, last: PUtf8Char;
+  h: PUtf8Char absolute headers;
 begin
   n := 0;
   tot := 0;
   purged := 0;
-  if upIgnore = nil then
-    upIgnore := @TOBEPURGED;
   // put all allowed headers in pos[]/len[]
-  P := pointer(headers);
-  if length(headers) shr 16 = 0 then // defined as word
-    while P <> nil do
-    begin
-      if P^ = #0 then
-        break;
-      next := GotoNextLine(P);
-      if IdemPPChar(P, upIgnore) < 0 then
-      begin
-        if n = high(len) then
-          break;
-        pos[n] := P - pointer(headers);
-        l := next - P;
-        if next = nil then
-          if (purged = 0) and
-             not trim then
-            break
-          else
-            l := StrLen(P);
-        inc(tot, l);
-        len[n] := l;
-        inc(n);
-      end
-      else
-        inc(purged);
-      P := next;
-    end;
-  // recreate an expurgated headers set
-  if (purged = 0) and
-     not trim then
-    // nothing to purge
-    result := headers
-  else if tot = 0 then
-    // genocide
-    result := ''
-  else
+  P := h;
+  if P <> nil then
   begin
-    // allocate at once and append all non-purged headers
+    last := nil;
+    if upIgnore = nil then
+      upIgnore := @TOBEPURGED;
+    if PStrLen(h - _STRLEN)^ <= high(pos[0]) then // void pos[]/len[] overflow
+      while (P <> nil) and
+            (P^ <> #0) do
+      begin
+        next := GotoNextLine(P);
+        if IdemPPChar(P, upIgnore) < 0 then // append this entry
+        begin
+          l := next - P;
+          if next = nil then
+            l := (h + PStrLen(h - _STRLEN)^) - P;
+          inc(tot, l);
+          if P = last then
+            inc(len[n - 1], l) // merge with previous block
+          else
+          begin
+            if n = high(len) then
+              break;
+            pos[n] := P - h;
+            len[n] := l;
+            inc(n);
+          end;
+          last := next;
+        end
+        else
+          inc(purged);
+        P := next;
+      end;
+  end;
+  // recreate an expurgated headers set
+  if tot = 0 then // genocide
+    result := ''
+  else if purged = 0 then
+    if (not trim) or
+       (headers[PStrLen(h - _STRLEN)^] > ' ') then
+      result := headers // nothing to purge
+    else
+      result := TrimRight(headers)
+  else
+  begin // allocate at once and append all non-purged headers
     dec(n);
     if trim then
     begin
-      P := PUtf8Char(pointer(headers)) + {%H-}pos[n];
+      P := h + {%H-}pos[n];
       l := {%H-}len[n];
       dec(tot, l);
       while (l > 0) and
@@ -2696,7 +2706,7 @@ begin
     P := FastSetString(result, tot);
     for i := 0 to n do
     begin
-      MoveFast(PByteArray(headers)[pos[i]], P^, len[i]);
+      MoveFast(h[pos[i]], P^, len[i]);
       inc(P, len[i]);
     end;
     assert(P - pointer(result) = tot);
@@ -2723,10 +2733,14 @@ begin
 end;
 
 procedure ExtractHeader(var headers: RawUtf8; const upname: RawUtf8;
-  out res: RawUtf8);
+  extractText: PRawUtf8; extractInt: PInt64);
 var
   i, j, k: PtrInt;
 begin
+  if extractText <> nil then
+    FastAssignNew(extractText^);
+  if extractInt <> nil then
+    extractInt^ := 0;
   if (headers = '') or
       (upname = '') then
     exit;
@@ -2745,7 +2759,10 @@ begin
     begin
       j := i;
       inc(i, length(upname));
-      TrimCopy(headers, i, k - i, res);
+      if extractText <> nil then
+        TrimCopy(headers, i, k - i, extractText^);
+      if extractInt <> nil then
+        SetInt64(@PByteArray(headers)[i - 1], extractInt^);
       while headers[k] in [#1 .. #31] do // delete also ending #13#10
         inc(k);
       delete(headers, j, k - j); // and remove
@@ -2783,6 +2800,23 @@ begin
     exit;
   Value := GetInt64(pointer(v), err);
   result := err = 0;
+end;
+
+function DeleteHeader(const Headers, Name: RawUtf8): RawUtf8;
+var
+  up: TByteToAnsiChar;
+  u: array[0..1] of PAnsiChar; // IdemPPChar() format
+begin
+  if (Headers = '') or
+     (length(Name) < 2) then
+  begin
+    result := Headers;
+    exit;
+  end;
+  PWord(UpperCopy255Buf(@up, pointer(Name), length(Name)))^ := ord(':');
+  u[0] := @up;
+  u[1] := nil;
+  result := PurgeHeaders(Headers, false, @u);
 end;
 
 function MimeHeaderEncode(const header: RawUtf8): RawUtf8;
@@ -3640,28 +3674,28 @@ procedure THttpRequestContext.HeadAddCustom(P, PEnd: PUtf8Char);
 var
   len: PtrInt;
   hh: THttpHeader;
-begin
+begin // caller ensured P <> nil
   repeat
-    len := BufferLineLength(P, PEnd); // use fast SSE2 assembly on x86-64 CPU
-    if len > 0 then // no void line (means headers ending)
-    begin
-      hh := KnownHttpHeader(P);
-      include(HeadCustom, hh); // used e.g. by CompressContentAndFinalizeHead()
-      case hh of
-        hhContentEncoding:
-          // custom CONTENT-ENCODING: disable any late compression
-          integer(CompressAcceptHeader) := 0;
-      end;
-      if not (hh in [hhConnection, hhTransferEncoding]) then
-      begin
-        Head.Append(P, len);
-        Head.AppendCRLF; // normalize CR/LF endings
-      end;
-      inc(P, len);
+    while P^ <= ' ' do
+      if P^ <> #0 then
+        inc(P) // trim spaces, and ignore any kind of line feed or void line
+      else
+        exit;  // end of input
+    len := BufferLineLength(P, PEnd); // SSE2 on x86-64 CPU - we know len <> 0
+    hh := KnownHttpHeader(P);
+    include(HeadCustom, hh); // used e.g. by CompressContentAndFinalizeHead()
+    case hh of
+      hhContentEncoding:
+        // custom CONTENT-ENCODING: disable any late compression
+        integer(CompressAcceptHeader) := 0;
     end;
-    while P^ in [#10, #13] do
-      inc(P);
-  until P^ = #0;
+    if not (hh in [hhConnection, hhTransferEncoding]) then
+    begin
+      Head.Append(P, len);
+      Head.AppendCRLF; // normalize CR/LF endings
+    end;
+    inc(P, len);
+  until false;
 end;
 
 procedure THttpRequestContext.UncompressData;
@@ -4509,7 +4543,7 @@ end;
 
 procedure THttpServerRequestAbstract.ExtractOutContentType;
 begin
-  ExtractHeader(fOutCustomHeaders, 'CONTENT-TYPE:', fOutContentType);
+  ExtractHeader(fOutCustomHeaders, 'CONTENT-TYPE:', @fOutContentType);
 end;
 
 function THttpServerRequestAbstract.GetRouteValuePosLen(const Name: RawUtf8;
@@ -5109,7 +5143,7 @@ procedure THttpLoggerWriter.TryRotate(Tix32: cardinal);
 begin
   if (fStream <> nil) and
      (fRotate.Trigger > hrtDisabled) then
-    fRotate.TryRotate(Tix32, fTotalFileSize + PendingBytes);
+    fRotate.TryRotate(Tix32, WrittenBytes + Int64(PendingBytes));
 end;
 
 procedure THttpLoggerWriter.WriteToStream(data: pointer; len: PtrUInt);
@@ -5296,7 +5330,7 @@ begin
     result := fWriterHostMain; // very common case of loopback or no Host
     if (Host <> '') and
        (ffHadDefineHost in fFlags) and
-       not IsLocalHost(pointer(Host)) then
+       (PCardinal(Host)^ <> HOST_127) then
     // 127.0.0.0/8 (e.g. from THttpClientSocket.RequestSendHeader) is no host
     begin
       result := fWriterHostLast; // pointer-sized variables are atomic
@@ -5320,7 +5354,7 @@ begin
         result := p^; // p^ = WriterHost[0] = access.log as default
         if (Host <> '') and
            (ffHadDefineHost in fFlags) and
-           not IsLocalHost(pointer(Host)) then
+           (PCardinal(Host)^ <> HOST_127) then
         begin
           n := PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1);
           inc(p); // ignore both WriterHost[0/1]

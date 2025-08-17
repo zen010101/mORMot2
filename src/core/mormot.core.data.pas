@@ -2512,8 +2512,8 @@ function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt
 // - expect UpperName as 'UPPERNAME=', otherwise returns false
 // - if no UPPERNAME= entry was found, then Name+NewValue is added to Content
 // - a typical use may be:
-// ! UpdateIniNameValue(headers,HEADER_CONTENT_TYPE,HEADER_CONTENT_TYPE_UPPER,contenttype);
-function UpdateIniNameValue(var Content: RawUtf8;
+// ! UpdateNameValue(headers,HEADER_CONTENT_TYPE,HEADER_CONTENT_TYPE_UPPER,contenttype);
+function UpdateNameValue(var Content: RawUtf8;
   const Name, UpperName, NewValue: RawUtf8): boolean;
 
 /// fill a class Instance properties from an .ini content
@@ -2897,7 +2897,7 @@ type
     function Contains(const aText: RawUtf8; aFirstIndex: integer = 0): PtrInt;
     /// retrieve the all lines, separated by the supplied delimiter
     // - this method is thread-safe
-    function GetText(const Delimiter: RawUtf8 = #13#10): RawUtf8;
+    function GetText(const Delimiter: RawUtf8 = EOL): RawUtf8;
     /// the OnChange event will be raised only when EndUpdate will be called
     // - this method will also call Safe.Lock for thread-safety
     procedure BeginUpdate;
@@ -2908,17 +2908,17 @@ type
     procedure SetFrom(const aText: TRawUtf8DynArray; const aObject: TObjectDynArray);
     /// set all lines, separated by the supplied delimiter
     // - this method is thread-safe
-    procedure SetText(const aText: RawUtf8; const Delimiter: RawUtf8 = #13#10);
+    procedure SetText(const aText: RawUtf8; const Delimiter: RawUtf8 = EOL);
     /// set all lines from a text file
     // - will assume text file with no BOM is already UTF-8 encoded
     // - this method is thread-safe
     procedure LoadFromFile(const FileName: TFileName);
     /// write all lines into the supplied stream
     // - this method is thread-safe
-    procedure SaveToStream(Dest: TStream; const Delimiter: RawUtf8 = #13#10);
+    procedure SaveToStream(Dest: TStream; const Delimiter: RawUtf8 = EOL);
     /// write all lines into a new UTF-8 file
     // - this method is thread-safe
-    procedure SaveToFile(const FileName: TFileName; const Delimiter: RawUtf8 = #13#10);
+    procedure SaveToFile(const FileName: TFileName; const Delimiter: RawUtf8 = EOL);
     /// return the count of stored RawUtf8
     // - reading this property is not thread-safe, since size may change
     property Count: PtrInt
@@ -4183,12 +4183,12 @@ begin
     result := FindIniEntry(Content, Section, Name, DefaultValue);
 end;
 
-function UpdateIniNameValueInternal(var Content: RawUtf8;
+function UpdateNameValueInternal(var Content: RawUtf8;
   const NewValue, NewValueCRLF: RawUtf8;
   var P: PUtf8Char; UpperName: PAnsiChar; UpperNameLength: integer): boolean;
 var
-  PBeg: PUtf8Char;
-  i: integer;
+  next: PUtf8Char;
+  i: PtrInt;
 begin
   if UpperName <> nil then
     while (P <> nil) and
@@ -4196,82 +4196,74 @@ begin
     begin
       while P^ = ' ' do
         inc(P);   // trim left ' '
-      PBeg := P;
-      P := GotoNextLine(P);
-      if IdemPChar2(@NormToUpperAnsi7, PBeg, UpperName) then
-      begin
-       // update Name=Value entry
+      next := GotoNextLine(P);
+      if IdemPChar2(@NormToUpperAnsi7, P, UpperName) then
+      begin // update Name=Value entry
         result := true;
-        inc(PBeg, UpperNameLength);
-        i := (PBeg - pointer(Content)) + 1;
+        inc(P, UpperNameLength);
+        i := (P - pointer(Content)) + 1;
         if (i = length(NewValue)) and
-           mormot.core.base.CompareMem(PBeg, pointer(NewValue), i) then
+           mormot.core.base.CompareMem(P, pointer(NewValue), i) then
           exit; // new Value is identical to the old one -> no change
-        if P = nil then // avoid last line (P-PBeg) calculation error
+        if next = nil then // avoid last line (P-PBeg) calculation error
           SetLength(Content, i - 1)
         else
-          delete(Content, i, P - PBeg); // delete old Value
+          delete(Content, i, next - P); // delete old Value
         insert(NewValueCRLF, Content, i); // set new value
         exit;
       end;
+      P := next;
     end;
   result := false;
 end;
 
-function UpdateIniNameValue(var Content: RawUtf8;
+function UpdateNameValue(var Content: RawUtf8;
   const Name, UpperName, NewValue: RawUtf8): boolean;
 var
   P: PUtf8Char;
 begin
+  result := false;
   if UpperName = '' then
-    result := false
-  else
-  begin
-    P := pointer(Content);
-    result := UpdateIniNameValueInternal(Content, NewValue, NewValue + #13#10,
-      P, pointer(UpperName), length(UpperName));
-    if result or
-       (Name = '') then
-      exit;
-    AppendLine(Content, [Name, NewValue]);
-    result := true;
-  end;
+    exit;
+  P := pointer(Content);
+  result := UpdateNameValueInternal(Content, NewValue, NewValue + #13#10,
+    P, pointer(UpperName), length(UpperName));
+  if result or
+     (Name = '') then
+    exit;
+  AppendLine(Content, [Name, NewValue]);
+  result := true;
 end;
 
-procedure UpdateIniEntry(var Content: RawUtf8;
-  const Section, Name, Value: RawUtf8);
-const
-  CRLF = #13#10;
+procedure UpdateIniEntry(var Content: RawUtf8; const Section, Name, Value: RawUtf8);
 var
   P: PUtf8Char;
   SectionFound: boolean;
-  i, UpperNameLength: PtrInt;
+  i, len: PtrInt;
   V: RawUtf8;
-  UpperSection, UpperName: TByteToAnsiChar;
+  up: TByteToAnsiChar;
 begin
-  UpperNameLength := length(Name);
-  PWord(UpperCopy255Buf(
-    UpperName{%H-}, pointer(Name), UpperNameLength))^ := ord('=');
-  inc(UpperNameLength);
-  Join([Value, CRLF], V);
+  Join([Value, EOL], V);
   P := pointer(Content);
   // 1. find Section, and try update within it
   if Section = '' then
     SectionFound := true // find the Name= entry before any [Section]
   else
   begin
-    PWord(UpperCopy255(UpperSection{%H-}, Section))^ := ord(']');
-    SectionFound := FindSectionFirstLine(P, UpperSection);
+    PWord(UpperCopy255(up{%H-}, Section))^ := ord(']');
+    SectionFound := FindSectionFirstLine(P, up);
   end;
+  len := length(Name);
+  PWord(UpperCopy255Buf(up{%H-}, pointer(Name), len))^ := ord('=');
+  inc(len);
   if SectionFound and
-     UpdateIniNameValueInternal(
-       Content, Value, V, P, @UpperName, UpperNameLength) then
+     UpdateNameValueInternal(Content, Value, V, P, @up, len) then
       exit;
   // 2. section or Name= entry not found: add Name=Value
   V := Join([Name, '=', V]);
   if not SectionFound then
     // create not existing [Section]
-    V := Join(['[', Section, (']' + CRLF), V]);
+    V := Join(['[', Section, (']' + EOL), V]);
   // insert Name=Value at P^ (end of file or end of [Section])
   if P = nil then
     // insert at end of file
@@ -4284,8 +4276,7 @@ begin
   end;
 end;
 
-procedure UpdateIniEntryFile(const FileName: TFileName;
-  const Section, Name, Value: RawUtf8);
+procedure UpdateIniEntryFile(const FileName: TFileName; const Section, Name, Value: RawUtf8);
 var
   Content: RawUtf8;
 begin

@@ -2033,7 +2033,7 @@ procedure TWebSocketProtocolJson.FrameCompress(const Head: RawUtf8;
 var
   WR: TJsonWriter;
   tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
-  i: PtrInt;
+  v, ve: PVarRec;
 begin
   frame.opcode := focText;
   frame.content := [];
@@ -2043,10 +2043,13 @@ begin
     WR.AddDirect('{');
     WR.AddFieldName(Head);
     WR.AddDirect('[');
-    for i := 0 to High(Values) do
+    v := @Values[0];
+    ve := @Values[High(Values)];
+    while PtrUInt(v) <= PtrUInt(ve) do
     begin
-      WR.AddJsonEscapeVarRec(@Values[i]);
+      WR.AddJsonEscapeVarRec(v);
       WR.AddComma;
+      inc(v);
     end;
     WR.AddDirect('"');
     WR.AddString(ContentType);
@@ -2817,14 +2820,15 @@ begin
   Protocol.fConnectionOpaque := ConnectionOpaque;
   Protocol.fRemoteIP := Http.HeaderGetValue('SEC-WEBSOCKET-REMOTEIP');
   if Protocol.RemoteIP = '' then
-  begin
-    Protocol.RemoteIP := RemoteIP;
-    Protocol.RemoteLocalhost := (RemoteIP = '127.0.0.1') or
-                                 (RemoteIPLocalHostAsVoidInServers and
-                                  (RemoteIP = ''));
-  end
+    if RemoteIP = '' then
+      Protocol.RemoteLocalhost := RemoteIPLocalHostAsVoidInServers
+    else
+    begin
+      Protocol.RemoteIP := RemoteIP;
+      Protocol.RemoteLocalhost := PCardinal(RemoteIP)^ = HOST_127
+    end
   else
-    Protocol.RemoteLocalhost := Protocol.RemoteIP = '127.0.0.1';
+    Protocol.RemoteLocalhost := PCardinal(RemoteIP)^ = HOST_127;
   // call OnUpgraded callback for request custom validation (e.g. bearer)
   if Assigned(fOnUpgraded) then
   begin

@@ -231,7 +231,7 @@ var
   i: PtrInt;
   fn: TFileName;
   key, prev, dto, client: RawUtf8;
-  ref: RawByteString;
+  refzip: RawByteString;
   api: TRawUtf8DynArray;
   oa: TOpenApiParser;
   timer: TPrecisionTimer;
@@ -263,9 +263,13 @@ begin
       api[i] := StringFromFile(fn);
       if api[i] <> '' then
         continue; // already downloaded
-      ref := DownloadFile('https://synopse.info/files/openapi-ref.zip');
-      if UnZipMemAll(ref, WorkDir) then // one url to rule them all
-        api[i] := StringFromFile(fn);  // try now
+      if refzip <> '' then
+        continue; // download .zip once
+      refzip := DownloadFile('https://synopse.info/files/openapi-ref.zip');
+      if refzip = '' then
+        refzip := 'none'
+      else if UnZipMemAll(refzip, WorkDir) then // one url to rule them all
+        api[i] := StringFromFile(fn); // try once
     end;
   for i := 0 to high(api) do
     if api[i] <> '' then
@@ -2305,7 +2309,7 @@ begin
   CheckEqual(StatusCodeToText(666)^, 'Client Side Connection Error');
   // validate TUri data structure
   U.Clear;
-  Check(U.UriScheme = usUnknown);
+  Check(U.UriScheme = usUndefined);
   CheckEqual(U.Uri, '');
   Check(U.From('toto.com'));
   CheckEqual(U.Uri, 'http://toto.com/');
@@ -2389,13 +2393,29 @@ begin
        '&cc=someone_else@example.com&body=This%20is%20the%20body';
   Check(U.From('mailto://someone@example.com' + s));
   CheckEqual(U.Scheme, 'mailto');
-  Check(U.UriScheme = usUnknown);
+  Check(U.UriScheme = usCustom);
   CheckEqual(U.Server, 'example.com');
   CheckEqual(U.Port, '');
   CheckEqual(U.User, 'someone');
   CheckEqual(U.Password, '');
   CheckEqual(U.Address, s);
   CheckEqual(U.Uri, 'mailto://example.com/' + s);
+  U.Clear; // TUri may be used to create an URI from some parameters
+  U.Server := '127.0.0.1';
+  U.Port := '991';
+  U.Address := 'endpoint';
+  CheckEqual(U.Uri, 'http://127.0.0.1:991/endpoint');
+  U.Clear;
+  U.Https := true;
+  U.Server := '127.0.0.1';
+  U.Address := 'endpoint';
+  CheckEqual(U.Port, '');
+  CheckEqual(U.Uri, 'https://127.0.0.1/endpoint');
+  CheckEqual(U.Port, '');
+  U.Port := '443';
+  CheckEqual(U.Uri, 'https://127.0.0.1/endpoint');
+  U.Port := '444';
+  CheckEqual(U.Uri, 'https://127.0.0.1:444/endpoint');
   // validate THttpCookies and CookieFromHeaders()
   hc.ParseServer('');
   CheckEqual(length(hc.Cookies), 0);

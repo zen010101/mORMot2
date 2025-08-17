@@ -3255,14 +3255,12 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
   procedure ProcessStaticFile;
   var
     fn: TFileName;
-    progsizeHeader: RawUtf8; // for rfProgressiveStatic mode
     fsiz: Int64;
   begin
     ExtractOutContentType;
     fn := Utf8ToString(OutContent); // safer than Utf8ToFileName() here
     OutContent := '';
-    ExtractHeader(fOutCustomHeaders, STATICFILE_PROGSIZE, progsizeHeader);
-    SetInt64(pointer(progsizeHeader), Context.ContentLength); // expected size
+    ExtractHeader(fOutCustomHeaders, STATICFILE_PROGSIZE, nil, @Context.ContentLength);
     if Context.ContentLength <> 0 then
       // STATICFILE_PROGSIZE: file is not fully available: wait for sending
       if ((not (rfWantRange in Context.ResponseFlags)) or
@@ -3347,10 +3345,10 @@ begin
   // append (and sanitize CRLF) custom headers from Request() method
   P := pointer(OutCustomHeaders);
   if P <> nil then
-    Context.HeadAddCustom(P, P + length(OutCustomHeaders));
+    Context.HeadAddCustom(P, P + PStrLen(P - _STRLEN)^);
   P := pointer(Context.ResponseHeaders);
   if P <> nil then // e.g. 'WWW-Authenticate: #####'#13#10
-    Context.HeadAddCustom(P, P + length(Context.ResponseHeaders));
+    Context.HeadAddCustom(P, P + PStrLen(P - _STRLEN)^);
   // generic headers
   if not (hhServer in Context.HeadCustom) then
     h^.Append(fServer.fRequestHeaders); // Server: and X-Powered-By:
@@ -4589,7 +4587,7 @@ begin
       if fAuthorizerDigest <> nil then
         result := fAuthorizerDigest.DigestInit(Opaque, 0);
     hraNegotiate:
-      result := 'WWW-Authenticate: Negotiate'#13#10; // with no NTLM support
+      result := SECPKGNAMEHTTPWWWAUTHENTICATE + #13#10; // with no NTLM support
   end;
 end;
 
@@ -4674,7 +4672,7 @@ begin
           b64end := PosChar(b64, #13);
           if (b64end = nil) or
              not Base64ToBin(PAnsiChar(b64), b64end - auth, bin) or
-             IdemPChar(pointer(bin), 'NTLM') then // two-way Kerberos only
+             ServerSspiDataNtlm(bin) then // two-way Kerberos only
             exit;
           {$ifdef OSPOSIX}
           if Assigned(fSspiKeyTab) then
@@ -4686,7 +4684,7 @@ begin
             begin
               ServerSspiAuthUser(ctx, user);
               Http.ResponseHeaders := BinToBase64(bout,
-                'WWW-Authenticate: Negotiate ', #13#10, {magic=}false);
+                SECPKGNAMEHTTPWWWAUTHENTICATE, #13#10, {magic=}false);
               result := asrMatch;
             end;
           finally
@@ -7105,9 +7103,9 @@ begin
     begin
       // pcfBearerDirect* for pcoHttpDirect mode: /https/microsoft.com/...
       if (aRemoteIp <> '') and
-         not (IsLocalHost(pointer(aRemoteIP)) or
-              (aRemoteIP = fMac.IP)) then
-        include(err, eDirectIp);
+         (PCardinal(aRemoteIP)^ <> HOST_127) and
+         (aRemoteIP <> fMac.IP) then
+        include(err, eDirectIp); // only accepted from local
       if not Check(BearerDecode(aBearerToken, pcfRequest, msg),
                'OnBeforeBody Direct', msg) then
         include(err, eDirectDecode)
