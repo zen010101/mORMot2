@@ -694,6 +694,9 @@ var
     {$endif OSDARWIN}
     {$endif OSWINDOWS};
 
+  /// the current Linux Distribution, depending on its package management system
+  OS_DISTRI: TLinuxDistribution;
+
   /// the current Operating System version, as retrieved for the current process
   // - contains e.g. 'Windows Seven 64 SP1 (6.1.7601)' or 'Windows XP SP3 (5.1.2600)' or
   // 'Windows 10 64bit 22H2 (10.0.19045.4046)' or 'macOS 13 Ventura (Darwin 22.3.0)' or
@@ -708,9 +711,6 @@ var
   // - contains e.g. 'Windows Vista' or 'Ubuntu Linux 5.4.0' or
   // 'macOS 13 Ventura 22.3.0'
   OSVersionShort: RawUtf8;
-
-  /// the current Linux Distribution, depending on its package management system
-  OS_DISTRI: TLinuxDistribution;
 
   {$ifdef OSWINDOWS}
   /// on Windows, the Update Build Revision as shown with the "ver/winver" command
@@ -727,14 +727,14 @@ var
   /// some textual information about the current CPU and its known cache
   // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz [3MB]'
   CpuInfoText: RawUtf8;
-  /// the on-chip cache size, in bytes, as returned by the OS
-  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
-  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
-  CpuCacheSize: cardinal;
   /// the available cache information as returned by the OS
   // - e.g. 'L1=2*32KB  L2=256KB  L3=3MB' on Windows or '3072 KB' on Linux
   CpuCacheText: RawUtf8;
 
+  /// the on-chip cache size, in bytes, as returned by the OS
+  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
+  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
+  CpuCacheSize: cardinal;
   /// how many hardware CPU sockets are defined on this system
   // - i.e. the number of physical CPU slots, not the number of logical CPU
   // cores as returned by SystemInfo.dwNumberOfProcessors
@@ -1062,7 +1062,34 @@ type
 
 {$endif UNICODE}
 
+{$endif OSWINDOWS}
+
 var
+  /// system and process 256-bit state
+  // - could be used as 512-bit: followed by other system state global variables
+  SystemEntropy: record
+    /// 128-bit of entropy quickly gathered during unit/process initialization
+    Startup: THash128Rec;
+    /// 128-bit shuffled each time strong randomness is retrieved from the OS
+    // - together with the intangible Startup value, ensure forward secrecy
+    LiveFeed: THash128Rec;
+  end;
+
+  /// the number of physical memory bytes available to the process
+  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
+  SystemMemorySize: PtrUInt;
+
+{$ifdef OSWINDOWS}
+
+  /// the current System information, as retrieved for the current process
+  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
+  // to retrieve the real top-most system information
+  // - note that the lpMinimumApplicationAddress field is replaced by a
+  // more optimistic/realistic value ($100000 instead of default $10000)
+  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
+  SystemInfo: TSystemInfo;
+  /// the current Windows edition, as retrieved for the current process
+  OSVersion: TWindowsVersion;
   /// is set to TRUE if the current process is a 32-bit image running under WOW64
   // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
   // to run seamlessly on 64-bit Windows
@@ -1071,22 +1098,12 @@ var
   /// is set to TRUE if the current process running through a software emulation
   // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
   IsWow64Emulation: boolean;
-  /// the current System information, as retrieved for the current process
-  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
-  // to retrieve the real top-most system information
-  // - note that the lpMinimumApplicationAddress field is replaced by a
-  // more optimistic/realistic value ($100000 instead of default $10000)
-  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
-  SystemInfo: TSystemInfo;
   /// low-level Operating System information, as retrieved for the current process
   OSVersionInfo: TOSVersionInfoEx;
-  /// the current Windows edition, as retrieved for the current process
-  OSVersion: TWindowsVersion;
 
 {$else OSWINDOWS}
 
-var
-  /// emulate only some used fields of Windows' TSystemInfo
+  /// emulate only the most used fields of Windows' TSystemInfo
   SystemInfo: record
     /// retrieved from libc's getpagesize() - is expected to not be 0
     dwPageSize: cardinal;
@@ -1103,13 +1120,6 @@ var
   end;
 
 {$endif OSWINDOWS}
-
-  /// the number of physical memory bytes available to the process
-  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
-  SystemMemorySize: PtrUInt;
-
-  /// 128-bit of entropy quickly gathered during unit/process initialization
-  StartupEntropy: THash128Rec;
 
 type
   /// used to retrieve version information from any EXE
@@ -3497,6 +3507,13 @@ type
   /// stores information about several disk partitions
   TDiskPartitions = array of TDiskPartition;
 
+/// return a memory block aligned to 16 bytes, e.g. for proper SMID processs
+// - Size > 128KB will call the OS mmap/VirtualAlloc to returned aligned memory
+// - do not use FreeMem() on the returned pointer, but FreeMemAligned()
+function GetMemAligned(Size: PtrUInt; FillWith: pointer = nil): pointer;
+
+/// properly release GetMemAligned() allocated memory
+procedure FreeMemAligned(p: pointer; Size: PtrUInt);
 
 const
   // 16*4KB (4KB = memory granularity) for ReserveExecutableMemory()
@@ -3986,7 +4003,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// enter an exclusive non-reentrant lock
     procedure Lock;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// try to enter an exclusive non-reentrant lock
     // - if returned true, caller should eventually call UnLock()
     // - could also be used to thread-safely acquire a shared resource
@@ -3997,7 +4014,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// leave an exclusive non-reentrant lock
     procedure UnLock;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
   end;
   PLightLock = ^TLightLock;
 
@@ -4811,13 +4828,12 @@ function RandomDouble: double;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// fill a memory buffer with random bytes from the gsl_rng_taus2 generator
-// - will actually XOR the Dest buffer with Lecuyer numbers
-// - consider also the cryptographic-level TAesPrng.Main.FillRandom() method
+// - this method is good enough e.g. for padding or generating test data
+// - consider cryptographic-level mormot.core.crypt TAesPrng.Main.FillRandom()
+// method or Random128() function to initialize a safe secret key, nonce or IV
+// - will actually XOR the Dest buffer with TLecuyer numbers
 // - thread-safe function calling SharedRandom - whereas the RTL Random() is not
-procedure RandomBytes(Dest: pointer; Count: integer); overload;
-
-/// fill 128-bit buffer with random bytes from the gsl_rng_taus2 generator
-procedure RandomBytes(out Dest: THash128); overload;
+procedure RandomBytes(Dest: pointer; Count: integer);
 
 /// fill a RawByteString with random bytes from the gsl_rng_taus2 generator
 // - see also e.g. RandomAnsi7() or RandomIdentifier() in mormot.core.text.pas
@@ -7968,7 +7984,7 @@ begin
       result := true
     else
     begin
-      Freemem(fBuf);
+      FreeMem(fBuf);
       fBuf := nil;
       fLoadedNotMapped := false;
     end;
@@ -8015,7 +8031,7 @@ procedure TMemoryMap.UnMap;
 begin
   if fLoadedNotMapped then
     // mapping was not worth it
-    Freemem(fBuf)
+    FreeMem(fBuf)
   else
     // call actual Windows/POSIX map API
     DoUnMap;
@@ -8150,6 +8166,39 @@ begin
   finally
     CurrentFakeStubBufferLock.UnLock;
   end;
+end;
+
+const
+  OS_ALIGNED = 128 shl 10; // call the OS for any block > 128KB
+
+function GetMemAligned(Size: PtrUInt; FillWith: pointer): pointer;
+var
+  pad: PtrUInt;
+begin
+  if Size >= OS_ALIGNED then
+    result := _GetLargeMem(Size) // mmap or VirtualAlloc will align to pagesize
+  else
+  begin
+    GetMem(result, Size + 16); // 15 bytes for alignment + 1 byte for padding
+    pad := 16 - (PtrUInt(result) and 15);   // adjust by 1..16 bytes
+    inc(PAnsiChar(result), pad);
+    PAnsiChar(result)[-1] := AnsiChar(pad); // always store the padding
+  end;
+  if FillWith <> nil then
+    MoveFast(FillWith^, result^, Size);
+end;
+
+procedure FreeMemAligned(p: pointer; Size: PtrUInt);
+begin
+  if p = nil then
+    exit;
+  if Size >= OS_ALIGNED then
+  begin
+    _FreeLargeMem(p, Size); // munmap or VirtualFree
+    exit;
+  end;
+  dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust back by 1..16 bytes
+  FreeMem(p);
 end;
 
 function SeemsRealObject(p: pointer): boolean;
@@ -8760,8 +8809,8 @@ begin
     Command.Parse;
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
-  crc32c128(@StartupEntropy, @CpuCache, SizeOf(CpuCache)); // some more entropy
-  crcblock(@StartupEntropy, @Executable.Hash);
+  crc32c128(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache)); // some more
+  crcblock(@SystemEntropy.Startup, @Executable.Hash);
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -9634,8 +9683,8 @@ begin
            {$ifdef OSPOSIX}
            _AfterDecodeSmbios(RawSmbios); // persist in SMB_CACHE for non-root
            {$endif OSPOSIX}
-           DefaultHasher128(@StartupEntropy, pointer(RawSmbios.Data),
-             MinPtrInt(1024, length(RawSmbios.Data))); // won't hurt
+           DefaultHasher128(@SystemEntropy.LiveFeed, pointer(RawSmbios.Data),
+             MinPtrInt(512, length(RawSmbios.Data))); // won't hurt
            exit;
          end;
       // if not root on POSIX, SMBIOS is not available
@@ -11052,11 +11101,6 @@ procedure RandomBytes(Dest: pointer; Count: integer);
 begin
   if Count > 0 then
     SharedRandom.Fill(Dest, Count);
-end;
-
-procedure RandomBytes(out Dest: THash128);
-begin
-  SharedRandom.Fill(@Dest, SizeOf(dest));
 end;
 
 function RandomByteString(Count: integer; var Dest; CodePage: cardinal): pointer;

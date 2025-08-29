@@ -2601,6 +2601,8 @@ type
   // - rsoRedirectServerRootUriForExactCase to search root URI case-sensitive,
   // mainly to avoid errors with HTTP cookies, which path is case-sensitive -
   // when set, such not exact case will be redirected via a HTTP 307 command
+  // - rsoWebSocketsUpgradeSigned will allow WebSockets upgrade only following
+  // TRestHttpServer.WebSocketsUrl/WebSocketsBearer() authorization
   // - rsoAllowSingleServerNoRoot will allow URI with no Model.Root prefix, i.e.
   // 'GET url' to be handled as 'GET root/url' - by design, it would work only
   // with a single registered TRestServer (to know which Model.Root to use)
@@ -2620,6 +2622,7 @@ type
     rsoOnlyJsonRequests,
     rsoOnlyValidUtf8,
     rsoRedirectServerRootUriForExactCase,
+    rsoWebSocketsUpgradeSigned,
     rsoAllowSingleServerNoRoot,
     rsoHeadersUnFiltered,
     rsoCompressSynLZ,
@@ -3519,16 +3522,9 @@ begin
   end;
 end;
 
-const
-  SQL_METHOD_WRITE: array[0..3] of PUtf8Char = (
-   'INSERT', // 'INSERT ... FROM ...'    -> mPOST
-   'UPDATE', // 'UPDATE (....) FROM ...' -> mPUT
-   'DELETE', // 'DELETE FROM ...'        -> mDELETE
-   nil);
-
 procedure TRestServerUriContext.OrmGetNoTable(params: PUtf8Char);
 var
-  sqlselect, sql: RawUtf8;
+  sqlfields, sql: RawUtf8;
   sqlisselect: boolean;
   tableindexes: TIntegerDynArray;
   opt: TOrmWriterOptions;
@@ -3548,12 +3544,12 @@ begin
         break;
   end
   else
-    // GET with a sql statement sent as UTF-8 body (not 100% HTTP compatible)
+    // GET with a sql statement sent as body (somewhat allowed in RFC 7231)
     sql := fCall^.InBody;
   if sql = '' then
     exit;
   // check permissions
-  sqlisselect := IsSelect(pointer(sql), @sqlselect);
+  sqlisselect := IsSelect(pointer(sql), @sqlfields);
   if not (sqlisselect or
           (reSql in fCall^.RestAccessRights^.AllowRemoteExecute)) then
     exit;
@@ -3598,19 +3594,19 @@ begin
   if fCall^.OutBody = '' then
     exit;
   // got JSON list '[{...}]' ?
-  if (sqlselect <> '') and
+  if (sqlfields <> '') and
      (length(tableindexes) = 1) then
   begin
     InternalSetTableFromTableIndex(tableindexes[0]);
     opt := ClientOrmOptions;
     if opt <> [] then
-      OrmGetConvertOutBodyAsPlainJson(sqlselect, opt);
+      OrmGetConvertOutBodyAsPlainJson(sqlfields, opt);
   end;
   fCall^.OutStatus := HTTP_SUCCESS;  // 200 OK
   if not sqlisselect then
     // needed for fStats.NotifyOrm(Method) below
-    fMethod := TUriMethod(IdemPPChar(SqlBegin(pointer(sql)),
-      @SQL_METHOD_WRITE) + 2); // not found (-1) -> +2 -> mGET=1
+    fMethod := TUriMethod(IdemPCharSep( // not found (-1) -> +2 -> mGET=1
+      SqlBegin(pointer(sql)), 'INSERT|UPDATE|DELETE|') + 2);
 end;
 
 procedure TRestServerUriContext.OrmGetTableID;
@@ -3692,8 +3688,6 @@ var
 begin
   // GET ModelRoot/TableName with 'select=..&where=' or YUI paging
   totalrowcount := 0;
-  // if no ?select= is specified, default is to return all IDs of this table
-  select := ROWID_TXT;
   if params <> nil then
   begin
     // extract '?select=...&where=...' or '?where=...' parameters
@@ -3720,6 +3714,8 @@ begin
         UrlDecodeValue(params, paging^.Where, where, @params);
       until params = nil;
     end;
+    if select = '' then
+      select := ROWID_TXT; // no ?select= returns all IDs of this table
     // let SQLite3 do the sort and the paging (will be ignored by Static)
     wherecount := where; // "select count(*)" won't expect any ORDER
     if (sort <> '') and
@@ -4842,11 +4838,10 @@ begin
         [fUser, fUser.IDValue], self);
   // compute the next Session ID and its associated private key
   fID := InterlockedIncrement(aCtxt.Server.fSessionCounter); // 20-bit number
-  if PInteger(@ServerProcessKdf)^ <> 0 then  // use our thread-safe CSPRNG
+  if PInteger(@ServerProcessKdf)^ <> 0 then  // use local thread-safe CSPRNG
     ServerProcessKdf.Compute(@fID, 8, rnd.b) // 8 > 4 bytes nonce ticks
   else
-    RandomBytes(rnd.Lo); // Lecuyer as fallback (paranoid)
-  XorMemory(rnd.l, rnd.h); // don't leak full state, but use full result
+    Random128(@rnd); // safe (but paranoid) unpredictable fallback
   BinToHexLower(@rnd, SizeOf(rnd.l), fPrivateKey); // 128-bit is enough
   ComputeProtectedValues(aCtxt.TickCount64);
   // this session has been successfully created
@@ -5206,7 +5201,7 @@ begin
   result := nil; // indicates invalid signature
 end;
 
-var // the HMAC-SHA-256 ServerProcessKdf() of the last two 4.3 minutes ticks
+var // cache HMAC-SHA-256 ServerProcessKdf() of the last two 4.3 minutes ticks
   ServerNonceCache: array[{previous=}boolean] of record
     safe: TLightLock;
     tix: cardinal;
@@ -5227,7 +5222,7 @@ begin
     ServerNonceCache[false].safe.Lock;
     if PInteger(@ServerProcessKdf)^ = 0 then // ensure thread-safe
     begin
-      ServerProcessKdf.Init(@StartupEntropy, SizeOf(StartupEntropy)); // salt
+      ServerProcessKdf.Init(@SystemEntropy, SizeOf(SystemEntropy)); // salt
       ServerProcessKdf.Update(tmp);
     end;
     ServerNonceCache[false].safe.UnLock;

@@ -2675,7 +2675,7 @@ begin
             not ConsoleHandleCtrlCPressed do
       begin
         if IsMultiThread then
-          CheckSynchronize{$ifndef DELPHI6OROLDER}(100){$endif}
+          CheckSynchronize(100)
         else
           Windows.Sleep(100);
         while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
@@ -2744,6 +2744,7 @@ var
     if VerQueryValueW(pt, Utf8ToWin32PWideChar(lngnfo + From, u), str, sz) and
        (sz > 0) then
       Win32PWideCharToUtf8(str, Res);
+    u.Done;
   end;
 
 begin
@@ -2793,7 +2794,7 @@ begin
         result := true;
       end;
     finally
-      Freemem(pt);
+      FreeMem(pt);
     end;
   end;
 end;
@@ -2936,6 +2937,16 @@ end;
 procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
 begin
   // nothing to be done on Windows: PAGE_EXECUTE_READWRITE always work
+end;
+
+function _GetLargeMem(BigSize: PtrUInt): pointer;
+begin
+  result := VirtualAlloc(nil, BigSize, MEM_COMMIT, PAGE_READWRITE);
+end;
+
+procedure _FreeLargeMem(p: pointer; BigSize: PtrUInt);
+begin
+  VirtualFree(p, 0, MEM_RELEASE);
 end;
 
 
@@ -4397,7 +4408,7 @@ var
   var
     new: RawByteString;
     pending, n: cardinal;
-    tmp: TSynTempBuffer;
+    tmp: TBuffer4K;
   begin
     repeat
       pending := 0;
@@ -4849,7 +4860,7 @@ begin
   if (PtrUInt(P) > MIN_PTR_VALUE) and
      (PtrUInt(SystemInfo.lpMinimumApplicationAddress) <= MIN_PTR_VALUE) then
     PtrUInt(SystemInfo.lpMinimumApplicationAddress) := MIN_PTR_VALUE;
-  Freemem(P);
+  FreeMem(P);
   FillCharFast(mem, SizeOf(mem), 0);
   mem.dwLength := SizeOf(mem);
   if GlobalMemoryStatusEx(mem) then
@@ -5041,15 +5052,17 @@ begin
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
   // 5. compute some minimal entropy using the just retrieved info
-  CoCreateGuid(StartupEntropy); // very fast, and won't hurt
+  CoCreateGuid(SystemEntropy.LiveFeed); // very fast and unique value
+  SystemEntropy.Startup := SystemEntropy.LiveFeed;
   {$ifdef CPUINTEL}
   if cfTSC in CpuFeatures then // may trigger a GPF if CR4.TSD bit is set
-    StartupEntropy.Lo := StartupEntropy.Lo xor Rdtsc; // fast and unpredictable
-  RdRand32(@StartupEntropy.c2, 2); // no-op on older CPUs
+    with SystemEntropy.Startup do
+      Lo := Lo xor Rdtsc; // unpredictable
+  RdRand32(@SystemEntropy.Startup.c2, 2); // no-op on older CPUs
   {$endif CPUINTEL}
-  crc32c128(@StartupEntropy, @SystemInfo, SizeOf(SystemInfo));
-  crc32c128(@StartupEntropy, @mem, SizeOf(mem));
-  crc32c128(@StartupEntropy, @OSVersionInfo, SizeOf(OSVersionInfo));
+  crc32c128(@SystemEntropy.Startup, @SystemInfo, SizeOf(SystemInfo));
+  crc32c128(@SystemEntropy.Startup, @mem, SizeOf(mem));
+  crc32c128(@SystemEntropy.Startup, @OSVersionInfo, SizeOf(OSVersionInfo));
   // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
 end;
 

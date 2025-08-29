@@ -11325,25 +11325,12 @@ begin
 end;
 
 const
-  FUNCS: array[0..6] of PAnsiChar = (
-    'MAX(',         // 0
-    'MIN(',         // 1
-    'AVG(',         // 2
-    'SUM(',         // 3
-    'JSONGET(',     // 4
-    'JSONHAS(',     // 5
-    nil);
+  FUNCS = 'MAX(|MIN(|AVG(|SUM(|JSONGET(|JSONHAS(|';
 
 function IsSqlFunction(P: PUtf8Char): boolean;
 begin
-  case IdemPPChar(P, @FUNCS) of
-    0..3:
-      result := PosChar(P + 4, ')') <> nil;
-    4..5:
-      result := PosChar(P + 8, ')') <> nil;
-  else
-    result := false;
-  end;
+  result := (IdemPCharSep(P, FUNCS) >= 0) and
+            (PosChar(P + 4, ')') <> nil);
 end;
 
 function TOrmPropertiesAbstract.IsFieldNameOrFunction(const PropName: RawUtf8): boolean;
@@ -11360,7 +11347,7 @@ begin
   P := pointer(PropName);
   if P[L - 1] = ')' then
   begin
-    case IdemPPChar(P, @FUNCS) of
+    case IdemPCharSep(P, FUNCS) of
       0..3:
         begin
           inc(P, 4);
@@ -11681,7 +11668,7 @@ var
   ptc: TRttiParserComplexType;
 begin
   // in-memory hashing are seeded from random to avoid hash flooding
-  OrmHashSeed := SharedRandom.Generator.Next xor StartupEntropy.c1;
+  OrmHashSeed := SharedRandom.Generator.Next xor SystemEntropy.Startup.c1;
   // manual set of OrmFieldTypeComp[] which are not exact TUtf8Compare match
   pointer(@OrmFieldTypeComp[oftAnsiText])   := @AnsiIComp;
   pointer(@OrmFieldTypeComp[oftUtf8Custom]) := @AnsiIComp;

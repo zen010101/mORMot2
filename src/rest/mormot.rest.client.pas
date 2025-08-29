@@ -1336,7 +1336,7 @@ begin
   aServerNonce := Sender.CallBackGetResult('auth', ['username', User.LogonName]);
   if aServerNonce = '' then
     exit;
-  SharedRandom.Fill(@rnd, SizeOf(rnd)); // public and unique: use Lecuyer
+  SharedRandom.Fill(@rnd, SizeOf(rnd)); // public from client: use TLecuyer
   Join([CardinalToHex(OSVersionInt32), '_', BinToHexLower(@rnd, SizeOf(rnd))],
     aClientNonce); // 160-bit nonce
   result := ClientGetSessionKey(Sender, User, [
@@ -3112,7 +3112,7 @@ begin
     begin
       fRest.Services.CallBackUnRegister(IInvokable(obj));
       dec(fRefCount); // GetInterface() did increase the refcount
-      fRest := nil; // notify once
+      fRest := nil;   // notify once
     end;
 end;
 

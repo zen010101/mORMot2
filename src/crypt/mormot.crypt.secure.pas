@@ -439,7 +439,7 @@ type
     fComputedCount: Int64;
     fCollisions: cardinal;
     fCryptoCRC: cardinal;
-    fCrypto: array[0..7] of cardinal; // only fCrypto[6..7] are used in practice
+    fCrypto: TBlock256; // only fCrypto[6..7] are used in practice
     fCryptoAesE, fCryptoAesD: TAes; // Initialized if aSharedObfuscationKeyNewKdf
   public
     /// initialize the generator for the given 16-bit process identifier
@@ -549,6 +549,8 @@ type
     hfSHA3_384,
     hfShake128,
     hfShake256);
+  /// a pointer to one of our hash algorithms
+  PHashAlgo = ^THashAlgo;
 
   /// set of algorithms available for HashFile/HashFull functions and TSynHasher object
   THashAlgos = set of THashAlgo;
@@ -577,8 +579,10 @@ type
   TSynHasher = object
   {$endif USERECORDWITHMETHODS}
   private
-    fAlgo: THashAlgo;
     ctxt: array[1..SHA3_CONTEXT_SIZE] of byte; // enough space for all algorithms
+    fAlgo: THashAlgo; // ctxt is better aligned if put first
+    procedure CopyTo(out aHasher: TSynHasher); {$ifdef FPC} inline; {$endif}
+    procedure Clear;                           {$ifdef FPC} inline; {$endif}
   public
     /// initialize the internal hashing structure for a specific algorithm
     // - returns false on unknown/unsupported algorithm
@@ -596,6 +600,8 @@ type
     procedure Final(var aResult: RawUtf8); overload;
     /// set the resulting hash into a binary buffer, and the size as result
     function Final(out aDigest: THash512Rec; aNoInit: boolean = false): integer; overload;
+    /// returns the resulting hash as raw binary string, with optional replication
+    procedure FinalBin(var aResult: RawByteString; aLen: PtrInt = 0);
     /// one-step hash computation of a buffer as lowercase hexadecimal string
     function Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// one-step hash computation of a buffer as lowercase hexadecimal string
@@ -607,9 +613,22 @@ type
     // - returns the written aDigest size in bytes
     function Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer;
       out aDigest: THash512Rec): integer; overload;
+    /// one-step hash computation of several buffers as a binary buffer
+    // - returns the written aDigest size in bytes
+    function Full(aAlgo: THashAlgo; const aBuffer: array of RawByteString;
+      out aDigest: THash512Rec): integer; overload;
     /// fill a buffer with the MGF1 seed deriviation, following RFC 2437
     // - a Mask Generation Function expands aSeed/aSeedLen into aDestLen buffer
     function Mgf1(aAlgo: THashAlgo; aSeed: pointer; aSeedLen, aDestLen: PtrUInt): RawByteString;
+    /// compute the Unix crypt hash of a given password as '$algo$salt$checksum'
+    // - currently implements safe SHA-256-CRYPT and SHA-512-CRYPT with hfSHA256
+    // and hfSHA512, as defined in https://www.akkadia.org/drepper/SHA-crypt.txt
+    // - deprecated MD5-CRYPT can also be generated (and verified) with hfMD5
+    // - any other algorithm is unsupported, and will fail and return ''
+    // - see ModularCryptVerify() for the associated verification function
+    function UnixCryptHash(aAlgo: THashAlgo; const aPassword: RawUtf8;
+      aRounds: cardinal = 0; aSaltSize: cardinal = 8;
+      const aSalt: RawUtf8 = ''; aHashPos: PInteger = nil): RawUtf8;
     /// returns the number of bytes of the hash of the current Algo
     function HashSize: integer;
     /// the hash algorithm used by this instance
@@ -767,6 +786,34 @@ type
     saSha224);
   PSignAlgo = ^TSignAlgo;
 
+  /// the algorithms known by ModularCryptIdentify/ModularCryptVerify
+  // - mcfMd5Crypt, mcfSha256Crypt and mcfSha512Crypt are handled by
+  // TSynHasher.UnixCryptVerify() and match $1$ $5$ $6$ common Unix Hashes
+  // - mcfPbkdf2Sha1, mcfPbkdf2Sha256 and mcfPbkdf2Sha512 match Python's PassLib
+  // specific-but-useful '$pbkdf2-{digest}${rounds}${salt}${checksum}' format
+  // - mcfPbkdf2Sha3 is our own SHA3-512 hash algorithm (with no HMAC) extension
+  // - mcfBCrypt is the BCrypt hashing algorithm, as developed for BSD systems -
+  // please include the mormot.crypt.other.pas unit to your project to enable it
+  // - mcfBCryptSha256 will first hash the password with HMAC-SHA-256 to support
+  // any password, e.g. > than 72 bytes (following passlib.hash.bcrypt_sha256)
+  // - mcfSCrypt is the SCrypt memory-intensive hashing algorithm, implemented in
+  // mormot.crypt.other.pas or in mormot.crypt.openssl.pas via global SCrypt()
+  TModularCryptFormat = (
+    mcfInvalid,
+    mcfUnknown,
+    mcfMd5Crypt,
+    mcfSha256Crypt,
+    mcfSha512Crypt,
+    mcfPbkdf2Sha1,
+    mcfPbkdf2Sha256,
+    mcfPbkdf2Sha512,
+    mcfPbkdf2Sha3,
+    mcfBCrypt,
+    mcfBCryptSha256,
+    mcfSCrypt);
+  /// allow to specify several ModularCryptIdentify/ModularCryptVerify algorithms
+  TModularCryptFormats = set of TModularCryptFormat;
+
 const
   /// the standard text of a TSignAlgo
   SIGNER_TXT: array[TSignAlgo] of RawUtf8 = (
@@ -830,9 +877,9 @@ type
     function Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// convenient wrapper to perform PBKDF2 safe iterative key derivation
-    procedure Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
+    function Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; aDerivatedKey: PHash512Rec;
-      aPartNumber: integer = 1); overload;
+      aPartNumber: integer = 1): PtrInt; overload;
     /// convenient wrapper to perform PBKDF2 safe iterative key derivation
     procedure Pbkdf2(const aParams: TSynSignerParams;
       out aDerivatedKey: THash512Rec); overload;
@@ -855,6 +902,13 @@ type
     // key is unbounded and could be bigger than the TSignAlgo digest size
     function Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round, aDestLen: PtrUInt): RawByteString; overload;
+    /// compute the Modular Crypt hash of a given password as computed by passlib
+    // pbkdf2.py - i.e. in '$pbkdf2-{digest}${rounds}${salt}${checksum}' format
+    // - see ModularCryptVerify() for the associated verification function
+    // - in addition to official passlib format, will include our '$pbkdf2-sha3$'
+    function Pbkdf2ModularCrypt(aAlgo: TModularCryptFormat; const aPassword: RawUtf8;
+      aRounds: cardinal = 0; aSaltSize: cardinal = 16;
+      const aSalt: RawUtf8 = ''; aHashPos: PInteger = nil): RawUtf8;
     /// compute NIST SP800-108 KDF in counter mode (section 5.1)
     // - as used e.g. by RFC 8009 for Kerberos AES-CTS HMAC-SHA2 modes
     function KdfSP800(aAlgo: TSignAlgo; aDestLen: cardinal;
@@ -879,6 +933,40 @@ type
 
 
 const
+  /// map the size in bytes (16..64) of any THashAlgo digest
+  // - note that SHA-3 or SHA512-256 share the same size with other algos
+  HASH_SIZE: array[THashAlgo] of byte = (
+    SizeOf(TMd5Digest),    // 16 bytes for hfMD5
+    SizeOf(TSHA1Digest),   // 20 bytes for hfSHA1
+    SizeOf(TSHA256Digest), // 32 bytes for hfSHA256
+    SizeOf(TSHA384Digest), // 48 bytes for hfSHA384
+    SizeOf(TSHA512Digest), // 64 bytes for hfSHA512
+    SizeOf(THash256),      // 32 bytes for hfSHA512_256
+    SizeOf(THash256),      // 32 bytes for hfSHA3_256
+    SizeOf(THash512),      // 64 bytes for hfSHA3_512
+    SizeOf(THash224),      // 28 bytes for hfSHA224
+    SizeOf(THash224),      // 28 bytes for hfSHA3_224
+    SizeOf(THash384),      // 48 bytes for hfSHA3_384
+    SizeOf(THash128),      // 16 bytes for hfShake128
+    SizeOf(THash256));     // 32 bytes for hfShake256
+
+  /// map the file extension text of any THashAlgo digest
+  // - TextToHashAlgo() is able to recognize those values
+  HASH_EXT: array[THashAlgo] of RawUtf8 = (
+    '.md5',        // hfMD5
+    '.sha1',       // hfSHA1
+    '.sha256',     // hfSHA256
+    '.sha384',     // hfSHA384
+    '.sha512',     // hfSHA512
+    '.sha512-256', // hfSHA512_256
+    '.sha3-256',   // hfSHA3_256
+    '.sha3-512',   // hfSHA3_512
+    '.sha224',     // hfSHA224
+    '.sha3-224',   // hfSHA3_224
+    '.sha3-384',   // hfSHA3_384
+    '.shake128',   // hfShake128
+    '.shake256');  // hfShake256
+
   /// convert a TSignAlgo / TSynSigner algorithm into a THashAlgo / TSynHasher
   SIGN_HASH: array[TSignAlgo] of THashAlgo = (
     hfSha1,     // saSha1
@@ -923,6 +1011,7 @@ function ToText(algo: THashAlgo): PShortString; overload;
 function ToUtf8(algo: THashAlgo): RawUtf8; overload; {$ifdef HASINLINE} inline; {$endif}
 function ToText(algo: TCrc32Algo): PShortString; overload;
 function ToText(const Digest: THashDigest): RawUtf8; overload; // 'hexhash' w/o algo
+function ToText(fmt: TModularCryptFormat): PShortString; overload;
 
 /// recognize a TSignAlgo from a text, e.g. 'SHAKE-128', 'saSha256' or 'SHA-3/256'
 function TextToSignAlgo(const Text: RawUtf8; out Algo: TSignAlgo): boolean; overload;
@@ -994,39 +1083,64 @@ function HashFileSha3_256(const FileName: TFileName): RawUtf8;
 function HashFileSha3_512(const FileName: TFileName): RawUtf8;
 
 const
-  /// map the size in bytes (16..64) of any THashAlgo digest
-  // - note that SHA-3 or SHA512-256 share the same size with other algos
-  HASH_SIZE: array[THashAlgo] of byte = (
-    SizeOf(TMd5Digest),    // 16 bytes for hfMD5
-    SizeOf(TSHA1Digest),   // 20 bytes for hfSHA1
-    SizeOf(TSHA256Digest), // 32 bytes for hfSHA256
-    SizeOf(TSHA384Digest), // 48 bytes for hfSHA384
-    SizeOf(TSHA512Digest), // 64 bytes for hfSHA512
-    SizeOf(THash256),      // 32 bytes for hfSHA512_256
-    SizeOf(THash256),      // 32 bytes for hfSHA3_256
-    SizeOf(THash512),      // 64 bytes for hfSHA3_512
-    SizeOf(THash224),      // 28 bytes for hfSHA224
-    SizeOf(THash224),      // 28 bytes for hfSHA3_224
-    SizeOf(THash384),      // 48 bytes for hfSHA3_384
-    SizeOf(THash128),      // 16 bytes for hfShake128
-    SizeOf(THash256));     // 32 bytes for hfShake256
+  MCF_ALGO: array[TModularCryptFormat] of THashAlgo = (hfShake128, hfShake128,
+    hfMD5, hfSHA256, hfSHA512, hfSHA1, hfSHA256, hfSHA512, hfSHA3_512,
+    hfShake128, hfSHA256, hfSHA256);
+  /// which ModularCryptIdentify/ModularCryptVerify() results are correct
+  mcfValid = [succ(mcfInvalid) .. high(TModularCryptFormat)];
 
-  /// map the file extension text of any THashAlgo digest
-  // - TextToHashAlgo() is able to recognize those values
-  HASH_EXT: array[THashAlgo] of RawUtf8 = (
-    '.md5',        // hfMD5
-    '.sha1',       // hfSHA1
-    '.sha256',     // hfSHA256
-    '.sha384',     // hfSHA384
-    '.sha512',     // hfSHA512
-    '.sha512-256', // hfSHA512_256
-    '.sha3-256',   // hfSHA3_256
-    '.sha3-512',   // hfSHA3_512
-    '.sha224',     // hfSHA224
-    '.sha3-224',   // hfSHA3_224
-    '.sha3-384',   // hfSHA3_384
-    '.shake128',   // hfShake128
-    '.shake256');  // hfShake256
+/// compute the "Modular Crypt" hash of a given password
+// - as returned by the python passlib library
+// - see associated ModularCryptIdentify/ModularCryptVerify() functions
+// - for mcfBCrypt, rounds is the 2^Cost value, so should be in 4..31 range
+// - for mcfSCrypt, rounds is <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
+  rounds: cardinal = 0; saltsize: cardinal = 0; const salt: RawUtf8 = ''): RawUtf8;
+
+/// identify if a given hash matches any "Modular Crypt" format
+// - e.g. returns true and mcfMd5Crypt for '$1${salt}${checksum}' or
+// mcfSha256Crypt for '$5$rounds={rounds}${salt}${checksum}'
+// - just check the '${ident}$' prefix, without actually checking the content
+function ModularCryptIdentify(const hash: RawUtf8): TModularCryptFormat;
+
+/// decode and check a password against a hash in "Modular Crypt" format
+// - if allowed is not default [], it would return mcfUnknown if not in this set
+// - you can also specify maxrounds, if you want to avoid any potential DoS
+// from forged hash values with artificially high number of rounds
+function ModularCryptVerify(const password, hash: RawUtf8;
+  allowed: TModularCryptFormats = []; maxrounds: cardinal = 0): TModularCryptFormat;
+
+/// low-level parsing function used by TSynHasher.UnixCryptVerify() and
+// ModularCryptIdentify/ModularCryptVerify
+// - for mcfSCrypt, rounds is <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
+  var salt: RawUtf8): TModularCryptFormat;
+
+/// compute the fake "rounds" value for ModularCryptHash(mcfSCrypt)
+// - i.e. <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+// - accepts LogN as [1..31], BlockSize=R as [1..16384] and Parallel=P as [1..8192]
+function SCryptRounds(LogN: cardinal = 16; BlockSize: cardinal = 8;
+  Parallel: cardinal = 1): cardinal;
+
+/// decode the fake "rounds" value for ModularCryptHash(mcfSCrypt) into LogN/R/P
+// - is the reverse function of SCryptRounds()
+// - for Rounds = 0, returns default LogN=16 BlockSize=R=8 Parallel=P=1 values
+procedure SCryptRoundsDecode(Rounds: cardinal; out LogN, BlockSize, Parallel: cardinal);
+
+/// SCrypt password hashing function compatible with passlib.hash.scrypt output
+// - as defined by https://www.tarsnap.com/scrypt/scrypt.pdf and RFC 7914
+// - SCrypt is more memory sensitive than BCrypt, so may be preferred
+// - in SCrypt terms, LogN will generate N = 2^LogN work factor scale, BlockSize
+// is the R parameter (to match CPU cache line), and Parallel the P parameter
+// - memory and CPU usage will scale linearly - e.g. 64MB with default LogN=16
+// and Blocksize=8 (to compare with the 4KB of BCrypt) - see SCryptMemoryUse()
+// - P will increase the CPU time without affecting memory requirements
+// - returning '$scrypt$ln=<log2(N)>,r=<r>,p=<p>$salt$<checksum>' format
+// - will call the available SCrypt() function defined - or a custom API
+function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
+  LogN: PtrUInt = 16; BlockSize: PtrUInt = 8; Parallel: PtrUInt = 1;
+  HashPos: PInteger = nil; Api: TSCriptRaw = nil): RawUtf8;
+
 
 { some HMAC/PBKDF2 common wrappers defined here to redirect to TSynSigner }
 
@@ -3783,25 +3897,44 @@ begin
   end;
 end;
 
+const
+  HASH_INSTANCE: array[THashAlgo] of word = (
+    SizeOf(TMd5),    SizeOf(TSha1),       SizeOf(TSha256), SizeOf(TSha384),
+    SizeOf(TSha512), SizeOf(TSha512_256), SizeOf(TSha3),   SizeOf(TSha3),
+    SizeOf(TSha256), SizeOf(TSha3),       SizeOf(TSha3),   SizeOf(TSha3),
+    SizeOf(TSha3));
+
+procedure TSynHasher.CopyTo(out aHasher: TSynHasher);
+begin
+  aHasher.fAlgo := fAlgo;
+  MoveFast(ctxt, aHasher.ctxt, HASH_INSTANCE[fAlgo]); // copy what is needed
+end;
+
+procedure TSynHasher.Clear;
+begin
+  FillCharFast(ctxt, HASH_INSTANCE[fAlgo], 0); // only clear what is needed
+end;
+
 procedure TSynHasher.Update(aBuffer: pointer; aLen: integer);
 begin
-  case fAlgo of
-    hfMD5:
-      PMd5(@ctxt)^.Update(aBuffer^, aLen);
-    hfSHA1:
-      PSha1(@ctxt)^.Update(aBuffer, aLen);
-    hfSHA224,
-    hfSHA256:
-      PSha256(@ctxt)^.Update(aBuffer, aLen);
-    hfSHA384:
-      PSha384(@ctxt)^.Update(aBuffer, aLen);
-    hfSHA512:
-      PSha512(@ctxt)^.Update(aBuffer, aLen);
-    hfSHA512_256:
-      PSha512_256(@ctxt)^.Update(aBuffer, aLen);
-  else
-    PSha3(@ctxt)^.Update(aBuffer, aLen);
-  end;
+  if aLen > 0 then
+    case fAlgo of
+      hfMD5:
+        PMd5(@ctxt)^.Update(aBuffer^, aLen);
+      hfSHA1:
+        PSha1(@ctxt)^.Update(aBuffer, aLen);
+      hfSHA224,
+      hfSHA256:
+        PSha256(@ctxt)^.Update(aBuffer, aLen);
+      hfSHA384:
+        PSha384(@ctxt)^.Update(aBuffer, aLen);
+      hfSHA512:
+        PSha512(@ctxt)^.Update(aBuffer, aLen);
+      hfSHA512_256:
+        PSha512_256(@ctxt)^.Update(aBuffer, aLen);
+    else
+      PSha3(@ctxt)^.Update(aBuffer, aLen);
+    end;
 end;
 
 procedure TSynHasher.Update(const aBuffer: RawByteString);
@@ -3863,6 +3996,26 @@ begin
   result := HASH_SIZE[fAlgo];
 end;
 
+procedure TSynHasher.FinalBin(var aResult: RawByteString; aLen: PtrInt);
+var
+  siz: PtrInt;
+  p: PAnsiChar;
+  dig: THash512Rec;
+begin
+  Final(dig);
+  siz := HASH_SIZE[fAlgo];
+  if aLen <= 0 then
+    aLen := siz;
+  p := FastNewRawByteString(aResult, aLen);
+  while aLen > siz do
+  begin
+    MoveFast(dig, p^, siz); // duplicate hash until aLen is reached
+    inc(p, siz);
+    dec(aLen, siz);
+  end;
+  MoveFast(dig, p^, aLen);
+end;
+
 function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8;
 begin
   result := '';
@@ -3896,6 +4049,14 @@ begin
   result := Final(aDigest);
 end;
 
+function TSynHasher.Full(aAlgo: THashAlgo; const aBuffer: array of RawByteString;
+  out aDigest: THash512Rec): integer;
+begin
+  Init(aAlgo);
+  Update(aBuffer);
+  result := Final(aDigest);
+end;
+
 function TSynHasher.Mgf1(aAlgo: THashAlgo;
   aSeed: pointer; aSeedLen, aDestLen: PtrUInt): RawByteString;
 var
@@ -3919,6 +4080,205 @@ begin
     inc(counter);
   until PtrUInt(dig) - PtrUInt(result) >= aDestLen;
   FakeLength(result, aDestLen);
+end;
+
+const
+  // https://github.com/besser82/libxcrypt
+  HASH64_CHARS: TChar64 =
+   './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  HASH64_128: THash128 = (
+    12, 6, 0, 13, 7, 1, 14, 8, 2, 15, 9, 3, 5, 10, 4, 11);
+  // https://www.akkadia.org/drepper/SHA-crypt.txt
+  HASH64_256: THash256 = (
+    20, 10, 0, 11, 1, 21, 2, 22, 12, 23, 13, 3, 14, 4, 24,
+    5, 25, 15, 26, 16, 6, 17, 7, 27, 8, 28, 18, 29, 19, 9, 30, 31);
+  HASH64_512: THash512 = (
+    42, 21, 0, 1, 43, 22, 23, 2, 44, 45, 24, 3, 4, 46, 25, 26, 5, 47,
+    48, 27, 6, 7, 49, 28, 29, 8, 50, 51, 30, 9, 10, 52, 31, 32, 11, 53,
+    54, 33, 12, 13, 55, 34, 35, 14, 56, 57, 36, 15, 16, 58, 37,
+    38, 17, 59, 60, 39, 18, 19, 61, 40, 41, 20, 62, 63);
+
+function b64enc(p: PUtf8Char; b, mask: PByteArray; n: cardinal): PUtf8Char;
+var
+  enc: PUtf8Char;
+  c: PtrUInt;
+begin
+  enc := @HASH64_CHARS; // custom Base64uriEncode() with shuffled bytes
+  repeat
+    c := b[mask[0]] or (PtrUInt(b[mask[1]]) shl 8) or (PtrUInt(b[mask[2]]) shl 16);
+    mask := @mask[3];
+    p[0] := enc[c and $3f];
+    p[1] := enc[(c shr 6) and $3f];
+    p[2] := enc[(c shr 12) and $3f];
+    p[3] := enc[c shr 18];
+    p := @p[4];
+    dec(n);
+  until n = 0;
+  result := p;
+end;
+
+procedure b64enclast(p: PUtf8Char; b1, b0, n: PtrUInt);
+var
+  enc: PUtf8Char;
+begin
+  inc(b0, b1 shl 8);
+  enc := HASH64_CHARS;
+  p[0] := enc[b0 and $3f];
+  p[1] := enc[(b0 shr 6) and $3f];
+  if n = SizeOf(THash256) then
+    p[2] := enc[(b0 shr 12) and $3f]; // 3 trailing chars for SHA-256
+end;
+
+function b64append(var hash: RawUtf8; n: cardinal; pos: PInteger): pointer;
+var
+  i: PtrUInt;
+begin
+  i := length(hash);
+  SetLength(hash, i + BinToBase64uriLength(n));
+  if pos <> nil then
+    pos^ := i + 1;
+  result := PAnsiChar(pointer(hash)) + i;
+end;
+
+function b64valid(p: PUtf8Char): boolean;
+begin
+  result := false;
+  if p = nil then
+    exit;
+  while true do
+    case p^ of
+      #0:
+        break;
+      '.', '/', '0'..'9', 'A'..'Z', 'a'..'z':
+        inc(p); // valid chars
+    else
+      exit;
+    end;
+  result := true;
+end;
+
+function TSynHasher.UnixCryptHash(aAlgo: THashAlgo; const aPassword: RawUtf8;
+  aRounds, aSaltSize: cardinal; const aSalt: RawUtf8; aHashPos: PInteger): RawUtf8;
+var
+  p: PUtf8Char;
+  c: AnsiChar;
+  siz, n, aPasswordSize: PtrUInt;
+  sbin, sb64, dp, ds: RawByteString;
+  alt: THash512Rec;
+begin
+  result := '';
+  if aRounds = 0 then
+    aRounds := 535000 // default for hfSha256/hfSha512
+  else
+    aRounds := MaxPtrUInt(aRounds, 1000); // >= 1000
+  case aAlgo of
+    hfMD5:
+      begin
+        aRounds := 1000; // fixed
+        aSaltSize := MinPtrUInt(aSaltSize, 8); // lower range
+        result := '$1$';
+      end;
+    hfSha256:
+      Make(['$5$rounds=', aRounds, '$'], result);
+    hfSha512:
+      Make(['$6$rounds=', aRounds, '$'], result);
+  else
+    exit;
+  end;
+  aPasswordSize := length(aPassword);
+  if aSalt = '' then
+  begin
+    if aSaltSize = 0 then
+      aSaltSize := 8
+    else if aSaltSize > 16 then
+      aSaltSize := 16; // for hfSha256/hfSha512
+    TAesPrng.Main.RandomSalt(sbin, sb64, aSaltSize, '', @HASH64_CHARS, nil);
+    FakeLength(sb64, aSaltSize); // aSaltSize is in base-64 chars, not bytes
+    FillZero(sbin);
+  end
+  else
+    sb64 := aSalt;
+  aSaltSize := length(sb64);
+  Append(result, sb64, '$');
+  siz := Full(aAlgo, [aPassword, sb64, aPassword], alt);
+  Init(aAlgo);
+  Update(pointer(aPassword), aPasswordSize);
+  if aAlgo = hfMD5 then
+    Update('$1$');
+  Update(pointer(sb64), aSaltSize);
+  n := aPasswordSize;
+  while n >= siz do
+  begin
+    Update(@alt, siz);
+    dec(n, siz);
+  end;
+  Update(@alt, n);
+  case aAlgo of
+    hfMD5:
+      begin
+        n := aPasswordSize;
+        while n > 0 do
+        begin
+          if (n and 1) <> 0 then
+            c := #0
+          else
+            c := aPassword[1];
+          Update(@c, 1); // weird
+          n := n shr 1;
+        end;
+        Final(alt);
+        dp := aPassword; // hash raw key/salt
+        ds := sb64;
+      end;
+    hfSha256,
+    hfSha512:
+      begin
+        n := aPasswordSize;
+        while n > 0 do
+        begin
+          if (n and 1) <> 0 then
+            Update(@alt, siz)
+          else
+            Update(pointer(aPassword), aPasswordSize);
+          n := n shr 1;
+        end;
+        Final(alt);
+        for n := 1 to aPasswordSize do // hash digest of key/salt
+          Update(pointer(aPassword), aPasswordSize);
+        FinalBin(dp, aPasswordSize);
+        for n := 1 to 16 + alt.b[0] do
+          Update(pointer(sb64), aSaltSize);
+        FinalBin(ds, aSaltSize);
+      end;
+  end;
+  for n := 0 to aRounds - 1 do
+  begin
+    if (n and 1) <> 0 then // add key or last result
+      Update(pointer(dp), aPasswordSize)
+    else
+      Update(@alt, siz);
+    if (n mod 3) <> 0 then // add salt for numbers not divisible by 3
+      Update(pointer(ds), aSaltSize);
+    if (n mod 7) <> 0 then // add key for numbers not divisible by 7
+      Update(pointer(dp), aPasswordSize);
+    if (n and 1) = 0 then  // add key or last result
+      Update(pointer(dp), aPasswordSize)
+    else
+      Update(@alt, siz);
+    Final(alt);
+  end;
+  p := b64append(result, siz, aHashPos);
+  case siz of // shuffled Base64uriEncode()
+    SizeOf(HASH64_128):
+      b64enclast(b64enc(p, @alt.b, @HASH64_128, 5), 0, alt.b[11], siz);
+    SizeOf(HASH64_256):
+      b64enclast(b64enc(p, @alt.b, @HASH64_256, 10), alt.b[31], alt.b[30], siz);
+    SizeOf(HASH64_512):
+      b64enclast(b64enc(p, @alt.b, @HASH64_512, 21), 0, alt.b[63], siz);
+  end;
+  FillZero(alt.b);
+  FillZero(dp);
+  FillZero(ds);
 end;
 
 
@@ -4274,6 +4634,278 @@ begin
   result := HashFile(FileName, hfSHA3_512);
 end;
 
+const
+  MCF_IDENT: array[mcfMd5Crypt.. high(TModularCryptFormat)] of RawUtf8 = (
+    '1', '5', '6', 'pbkdf2', 'pbkdf2-sha256', 'pbkdf2-sha512', 'pbkdf2-sha3',
+    '2b', 'bcrypt-sha256', 'scrypt');
+
+function ModularCryptParse(var P: PUtf8Char; var rounds: cardinal;
+  var salt: RawUtf8): TModularCryptFormat;
+var
+  sLogN, sR, sP: cardinal;
+begin
+  result := mcfInvalid;
+  if (P = nil) or
+     (P^ <> '$') then
+    exit;
+  inc(P);
+  GetNextItem(P, '$', salt);
+  if salt = '' then
+    exit;
+  case GetCardinal(pointer(salt)) of
+    1:
+      result := mcfMd5Crypt;
+    2: // $2a$ $2b$ $2x$ $2y$ $2z$ ...
+      result := mcfBCrypt;
+    5:
+      result := mcfSha256Crypt;
+    6:
+      result := mcfSha512Crypt;
+  else
+    result := TModularCryptFormat(FindNonVoidRawUtf8(@MCF_IDENT,
+      pointer(salt), length(salt), length(MCF_IDENT)) + ord(low(MCF_IDENT)));
+  end;
+  case result of
+    mcfMd5Crypt:      // '$1${salt}${checksum}'
+      rounds := 1000; // fixed
+    mcfSha256Crypt .. mcfSha512Crypt:
+      begin // '$5$rounds={rounds}${salt}${checksum}'
+        if IdemPChar(P, 'ROUNDS=') then
+          begin
+            inc(P, 7);
+            rounds := GetNextItemCardinal(P, '$');
+          end
+          else
+            rounds := 5000; // default for SHA-256 Crypt and SHA-512 Crypt
+      end;
+    mcfPbkdf2Sha1 .. mcfBCrypt:
+      begin // '$pbkdf2{-digest}${rounds}${salt}${checksum}'
+        rounds := GetNextItemCardinal(P, '$');
+        if rounds = 0 then
+        begin
+          result := mcfInvalid;
+          exit;
+        end;
+      end; // for mcfBCrypt: '$2a$rounds$saltchecksum' - here = cost (4..31)
+    mcfBCryptSha256:
+      begin // '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uk...'
+        result := mcfInvalid;
+        if not IdemPChar(P, 'V=2,T=2') then // version 1 without HMAC was unsafe
+          exit;
+        inc(P, 7);
+        if P^ <> ',' then
+          if P^ in ['a'..'z'] then
+            inc(P)
+          else
+            exit;
+        if not IdemPChar(P, ',R=') then
+          exit;
+        inc(P, 3);
+        rounds := GetNextItemCardinal(P, '$');
+        if not (rounds in [4 .. 31]) then
+          exit;
+        result := mcfBCryptSha256;
+      end;
+    mcfSCrypt:
+      begin // '$scrypt$ln=<log2(N)>,r=<r>,p=<p>$salt$<checksum>'
+        result := mcfInvalid;
+        if not IdemPChar(P, 'LN=') then
+          exit;
+        inc(P, 3);
+        sLogN := GetNextItemCardinal(P, ','); // logN in [1..31]
+        if (sLogN = 0) or
+           (sLogN > 31) or
+           not IdemPChar(P, 'R=') then
+          exit;
+        inc(P, 2);
+        sR := GetNextItemCardinal(P, ',');     // R in [1..16384]
+        if (sR = 0) or
+           (sR > 16384) or
+           not IdemPChar(P, 'P=') then
+          exit;
+        inc(P, 2);
+        sP := GetNextItemCardinal(P, '$');     // P in [1..8191]
+        if (sP = 0) or
+           (sP > 8192) then
+          exit;
+        // rounds := <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+        rounds := SCryptRounds(sLogN, sR, sP);
+        GetNextItem(P, '$', salt);
+        if (salt = '') or
+           (P = nil) then
+          exit;
+        result := mcfSCrypt;
+        exit; // b64valid() is not the $scrypt$ charset but standard base64
+      end;
+  else
+    begin
+      result := mcfUnknown;
+      exit;
+    end;
+  end;
+  if result = mcfBCrypt then
+  begin
+    FastSetString(salt, P, 22); // fixed 22 chars salt
+    inc(P, 22);
+    if StrLen(P) <> 31 then     // fixed 31 chars checksum
+      P := nil;
+  end
+  else
+    GetNextItem(P, '$', salt);
+  if not b64valid(pointer(salt)) or
+     not b64valid(P) then
+    result := mcfInvalid;
+end; // on success, P points to the {checksum} part
+
+function ModularCryptIdentify(const hash: RawUtf8): TModularCryptFormat;
+var
+  dummyrounds: cardinal;
+  dummysalt: RawUtf8;
+  P: PUtf8Char;
+begin
+  P := pointer(hash);
+  result := ModularCryptParse(P, dummyrounds, dummysalt);
+end;
+
+function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
+  rounds, saltsize: cardinal; const salt: RawUtf8): RawUtf8;
+var
+  signer: TSynSigner;
+  logN, R, P: cardinal;
+  hasher: TSynHasher absolute signer;
+  dig: THash256 absolute signer;
+begin
+  case format of
+    mcfMd5Crypt .. mcfSha512Crypt:
+      result := hasher.UnixCryptHash(MCF_ALGO[format], password, rounds, saltsize, salt);
+    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
+      result := signer.Pbkdf2ModularCrypt(format, password, rounds, saltsize, salt);
+    mcfBCrypt, mcfBCryptSha256:
+      if Assigned(BCrypt) then
+        result := BCrypt(password, salt, rounds, nil, format = mcfBCryptSha256);
+    mcfSCrypt:
+      begin // rounds=<logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+        SCryptRoundsDecode(rounds, logN, R, P);
+        result := SCryptHash(password, salt, logN, R, P);
+      end;
+  else
+    result := '';
+  end;
+end;
+
+function ModularCryptVerify(const password, hash: RawUtf8;
+  allowed: TModularCryptFormats; maxrounds: cardinal): TModularCryptFormat;
+var
+  rounds, pos, logN, R, P: cardinal;
+  salt, h: RawUtf8;
+  checksum: PUtf8Char;
+  signer: TSynSigner;
+  hasher: TSynHasher absolute signer;
+begin
+  checksum := pointer(hash);
+  result := ModularCryptParse(checksum, rounds, salt);
+  if not (result in mcfValid) then
+    exit;
+  if (allowed <> []) and
+     not (result in allowed) then
+  begin
+    result := mcfUnknown;
+    exit;
+  end;
+  if (maxrounds <> 0) and
+     (rounds > maxrounds) then
+  begin
+    result := mcfInvalid;
+    exit;
+  end;
+  pos := 0;
+  case result of
+    mcfMd5Crypt .. mcfSha512Crypt:
+      h := hasher.UnixCryptHash(MCF_ALGO[result], password, rounds, 0, salt, @pos);
+    mcfPbkdf2Sha1 .. mcfPbkdf2Sha3:
+      h := signer.Pbkdf2ModularCrypt(result, password, rounds, 0, salt, @pos);
+    mcfBCrypt .. mcfBCryptSha256:
+      if (rounds in [4 .. 31]) and
+         (length(salt) = 22) then
+        h := BCrypt(password, salt, rounds, @pos, result = mcfBCryptSha256)
+      else
+        result := mcfInvalid;
+    mcfScrypt:
+      begin // rounds=<logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+        SCryptRoundsDecode(rounds, logN, R, P);
+        h := SCryptHash(password, salt, logN, R, P, @pos);
+      end;
+  end;
+  if (pos = 0) or
+     (mormot.core.base.StrComp(checksum, PUtf8Char(pointer(h)) + pos - 1) <> 0) then
+    result := mcfInvalid;
+end;
+
+function SCryptRounds(LogN, BlockSize, Parallel: cardinal): cardinal;
+begin // = <logN:5-bit:1..31><R:14-bit:1..16384><P:13-bit:1..8192>
+  if LogN = 0 then
+    LogN := 16
+  else if LogN > 31 then
+    LogN := 31;
+  if BlockSize = 0 then
+    BlockSize := 8
+  else if BlockSize > 16384 then
+    BlockSize := 16384;
+  if Parallel = 0 then
+    Parallel := 1
+  else if Parallel > 8192 then
+    Parallel := 8192;
+  result := (LogN shl 27) + ((BlockSize - 1) shl 13) + (Parallel - 1);
+end;
+
+procedure SCryptRoundsDecode(Rounds: cardinal; out LogN, BlockSize, Parallel: cardinal);
+begin
+  LogN := Rounds shr 27;
+  if LogN = 0 then
+    LogN := 16;     // LogN never 0, 5-bit up to 31
+  BlockSize :=  (Rounds shr 13) and 16383;
+  if BlockSize = 0 then
+    BlockSize := 8
+  else
+    inc(BlockSize); // R never 0, 14-bit up to 16384
+  Parallel := Rounds and 8191;
+  if Parallel = 0 then
+    Parallel := 1
+  else
+    inc(Parallel); // P never 0, 13-bit up to 8192
+end;
+
+const
+  SCRYPT_KEYLEN  = 32; // 32-byte output key = 43 chars
+  SCRYPT_SALTLEN = 16; // 16-byte default salt = 22 chars
+
+function SCryptHash(const Password: RawUtf8; const Salt: RawUtf8; LogN: PtrUInt;
+  BlockSize: PtrUInt; Parallel: PtrUInt; HashPos: PInteger; Api: TSCriptRaw): RawUtf8;
+var
+  saltbin, saltb64, hash: RawByteString;
+begin
+  result := '';
+  if not Assigned(Api) then
+    Api := @SCrypt; // from mormot.crypt.other or mormot.crypt.openssl
+  if not Assigned(Api) or
+     (LogN <= 1) or
+     (LogN > 31) or
+     (BlockSize = 0) or
+     (Parallel = 0) then
+    exit;
+  if not TAesPrng.Main.RandomSalt(saltbin, saltb64, SCRYPT_SALTLEN, Salt,
+           @ConvertToBase64, @ConvertBase64ToBin) then
+    exit; // expects standard base64 but without trailing '='
+  hash := Api(Password, saltbin, 1 shl LogN, BlockSize, Parallel, SCRYPT_KEYLEN);
+  if hash = '' then
+    exit;
+  Make(['$scrypt$ln=', LogN, ',r=', BlockSize, ',p=', Parallel, '$',
+        saltb64, '$'], result);
+  if HashPos <> nil then
+    HashPos^ := length(result) + 1;
+  Append(result, BinToBase64uri(hash, @ConvertToBase64));
+end;
+
 
 { TSynSigner }
 
@@ -4285,14 +4917,13 @@ const
 
 procedure TSynSigner.Init(aAlgo: TSignAlgo; aSecret: pointer; aSecretLen: integer);
 var
-  i: PtrInt;
-  k0, k0xorIpad: TBlock1024;
+  k0: TBlock1024;
   a: THashAlgo;
 begin
   fAlgo := aAlgo;
   a := SIGN_HASH[Algo];
   fSignatureSize := SIGN_SIZE[Algo];
-  fBlockMax := BLOCK_SIZE[Algo];
+  fBlockMax := BLOCK_SIZE[Algo]; // typically 15 (256-bit) or 31 (512-bit)
   fBlockSize := (fBlockMax + 1) shl 2;
   if fBlockMax = 0 then
   begin // we estimate that the HMAC pattern is part of the SHA-3 sponge design
@@ -4305,14 +4936,11 @@ begin
     fHasher.Full(a, aSecret, aSecretLen, PHash512Rec(@k0)^)
   else
     MoveFast(aSecret^, k0, aSecretLen);
-  for i := 0 to fBlockMax do
-    k0xorIpad[i] := k0[i] xor $36363636;
-  for i := 0 to fBlockMax do
-    fStep7data[i] := k0[i] xor $5c5c5c5c;
+  Xor32By128(@fStep7data, @k0, fBlockMax, $5c5c5c5c);
+  Xor32By128(@k0, @k0, fBlockMax, $36363636);
   fHasher.Init(a);
-  fHasher.Update(@k0xorIpad, fBlockSize);
+  fHasher.Update(@k0, fBlockSize);
   FillCharFast(k0, fBlockSize, 0);
-  FillCharFast(k0xorIpad, fBlockSize, 0);
 end;
 
 procedure TSynSigner.Init(aAlgo: TSignAlgo; const aSecret: RawUtf8);
@@ -4389,34 +5017,37 @@ begin
   result := Final;
 end;
 
-procedure TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
-  aSecretPbkdf2Round: integer; aDerivatedKey: PHash512Rec; aPartNumber: integer);
+function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
+  aSecretPbkdf2Round: integer; aDerivatedKey: PHash512Rec; aPartNumber: integer): PtrInt;
 var
-  iter: TSynSigner;
-  temp: THash512Rec;
-  i: integer;
+  bak: TSynHasher;
+  tmp: THash512Rec;
 begin
-  Init(aAlgo, aSecret);
-  iter := self;
-  iter.Update(aSalt);
-  if not (Algo in SIGNER_SHA3) then // padding + XoF are part of SHA-3
+  Init(aAlgo, aSecret); // = PRF(secret)
+  dec(aSecretPbkdf2Round);
+  if aSecretPbkdf2Round <> 0 then
+    fHasher.CopyTo(bak); // save initial PRF(secret) state
+  Update(aSalt);
+  if not (Algo in SIGNER_SHA3) then // padding + XOF mode are part of SHA-3
     // U1 = PRF(secret, salt + INT_32_BE(part))
-    iter.UpdateBigEndian(aPartNumber);  // is a 1-based index
-  iter.Final(aDerivatedKey, true);
-  if aSecretPbkdf2Round < 2 then
-    exit;
-  // F(secret, salt, c, i) = U1 ^ U2 ^ .. ^ Uc  with Uc = PRF(secret, Uc-1)
-  temp := aDerivatedKey^;
-  for i := 2 to aSecretPbkdf2Round do
+    UpdateBigEndian(aPartNumber);  // is a 1-based index
+  Final(aDerivatedKey, {noinit=}true);
+  if aSecretPbkdf2Round <> 0 then
   begin
-    iter := self;
-    iter.Update(@temp, fSignatureSize);
-    iter.Final(@temp, true);
-    XorMemory(pointer(aDerivatedKey), @temp, fSignatureSize);
+    // F(secret, salt, c, i) = U1 ^ U2 ^ .. ^ Uc  with Uc = PRF(secret, Uc-1)
+    MoveFast(aDerivatedKey^, tmp, fSignatureSize);
+    repeat
+      MoveFast(bak.ctxt, fHasher.ctxt, HASH_INSTANCE[fHasher.fAlgo]); // restore
+      Update(@tmp, fSignatureSize);
+      Final(@tmp, {noinit=}true);
+      XorMemory(pointer(aDerivatedKey), @tmp, fSignatureSize);
+      dec(aSecretPbkdf2Round);
+    until aSecretPbkdf2Round = 0;
+    bak.Clear;
+    FillZero(tmp.b);
   end;
-  FillZero(temp.b);
-  FillCharFast(iter.fHasher.ctxt, SizeOf(iter.fHasher.ctxt), 0);
-  FillCharFast(fHasher.ctxt, SizeOf(fHasher.ctxt), 0);
+  Done;
+  result := fSignatureSize;
 end;
 
 procedure TSynSigner.Pbkdf2(const aParams: TSynSignerParams;
@@ -4479,7 +5110,7 @@ end;
 function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
   aSecretPbkdf2Round, aDestLen: PtrUInt): RawByteString;
 var
-  hlen, l, r, i: cardinal;
+  hlen, l, r, part: cardinal;
   p: PHash512Rec;
 begin
   // see https://www.rfc-editor.org/rfc/rfc2898#section-5.2
@@ -4495,16 +5126,57 @@ begin
   r := aDestLen - (l * hlen); // mod
   if r <> 0 then
     inc(l); // ceil()
-  // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, i)
+  if (Algo in SIGNER_SHA3) and
+     (l > 1) then
+    ESynCrypto.RaiseUtf8('TSynSigner.Pbkdf2(%) with DestLen=%: use SHAKE instead',
+      [ToText(algo)^, aDestLen]);
+  // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, part)
   p := FastNewString(l * hlen); // pre-allocate destination buffer
   pointer(result) := p;
-  for i := 1 to l do
+  for part := 1 to l do
   begin
-    Pbkdf2(aAlgo, aSecret, aSalt, aSecretPbkdf2Round, p, i);
+    Pbkdf2(aAlgo, aSecret, aSalt, aSecretPbkdf2Round, p, part);
     inc(PByte(p), hlen); // just concatenate each Ti
   end;
   if r <> 0 then
     FakeLength(result, aDestLen); // truncate to the expected destination size
+end;
+
+const
+  MCF_SIGN: array[mcfPbkdf2Sha1 .. mcfPbkdf2Sha3] of TSignAlgo = (
+    saSHA1, saSHA256, saSHA512, saSha3512);
+  MCF_ROUNDS: array[mcfPbkdf2Sha1 .. mcfPbkdf2Sha3] of cardinal = (
+    131000, 29000, 25000, 20000);
+  HASH64_ENC: TChar64 = // the current encoding used by "$pbkdf2" passlib
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./';
+var
+  HASH64_DEC: TAnsiCharDec;
+
+function TSynSigner.Pbkdf2ModularCrypt(aAlgo: TModularCryptFormat;
+  const aPassword: RawUtf8; aRounds, aSaltSize: cardinal;
+  const aSalt: RawUtf8; aHashPos: PInteger): RawUtf8;
+var
+  siz: PtrUInt;
+  bin, b64: RawByteString;
+  dig: THash512;
+begin
+  result := '';
+  if (aPassword = '') or
+     not (aAlgo in [low(MCF_SIGN) .. high(MCF_SIGN)]) then
+    exit;
+  if aRounds = 0 then
+    aRounds := MCF_ROUNDS[aAlgo]; // use default of each algorithm
+  if aSaltSize = 0 then
+    aSaltSize := 16;
+  if HASH64_DEC[#255] = 0 then // check the last byte for thread-safe init
+    FillBaseDecoder(@HASH64_ENC, @HASH64_DEC, high(HASH64_ENC));
+  if not TAesPrng.Main.RandomSalt(bin, b64, aSaltSize, aSalt, @HASH64_ENC, @HASH64_DEC) then
+    exit;
+  Make(['$', MCF_IDENT[aAlgo], '$', aRounds, '$', b64, '$'], result);
+  siz := Pbkdf2(MCF_SIGN[aAlgo], aPassword, bin, aRounds, @dig);
+  Base64uriEncode(b64append(result, siz, aHashPos), @dig, siz, @HASH64_ENC);
+  FillZero(bin);
+  FillZero(b64);
 end;
 
 function TSynSigner.KdfSP800(aAlgo: TSignAlgo; aDestLen: cardinal;
@@ -4580,8 +5252,10 @@ end;
 
 procedure TSynSigner.Done;
 begin
-  FillCharFast(self, SizeOf(self), 0);
+  FillCharFast(fHasher.ctxt, HASH_INSTANCE[fHasher.fAlgo], 0);
+  FillCharFast(fStep7data, fBlockSize, 0);
 end;
+
 
 function ToText(algo: TSignAlgo): PShortString;
 begin
@@ -4614,6 +5288,11 @@ begin
     BinToHexLower(PAnsiChar(@Digest.Bin), HASH_SIZE[Digest.Algo], result)
   else
     FastAssignNew(result);
+end;
+
+function ToText(fmt: TModularCryptFormat): PShortString; overload;
+begin
+  result := GetEnumName(TypeInfo(TModularCryptFormat), ord(fmt));
 end;
 
 function SanitizeAlgoName(P: PUtf8Char; L: PtrInt; var tmp: TShort15;
@@ -4851,21 +5530,6 @@ begin
   HashLen := HASH_SIZE[Hash];
 end;
 
-const
-  DIGEST_KEYS: array[0..11] of PAnsiChar = (
-    'REALM=',     // 0
-    'QOP=',       // 1
-    'URI=',       // 2
-    'ALGORITHM=', // 3
-    'NONCE=',     // 4
-    'NC=',        // 5
-    'CNONCE=',    // 6
-    'RESPONSE=',  // 7
-    'OPAQUE=',    // 8
-    'USERNAME=',  // 9
-    'AUTHZID=',   // 10
-    nil);
-
 function TDigestProcess.Parse(var p: PUtf8Char): boolean;
 var
   n: PUtf8Char;
@@ -4879,7 +5543,8 @@ begin
   GetNextItem(p, ',', '"', RawUtf8(tmp));
   if tmp = '' then
     exit;
-  case IdemPPChar(n, @DIGEST_KEYS) of
+  case IdemPCharSep(n, 'REALM=|QOP=|URI=|ALGORITHM=|NONCE=|NC=|CNONCE=|' +
+                       'RESPONSE=|OPAQUE=|USERNAME=|AUTHZID=|') of
     0: // realm="http-auth@example.org"
       FastAssignUtf8(Realm, tmp);
     1: // qop=auth
@@ -6420,8 +7085,8 @@ begin
     fContext.SessionSequence := Random32 shr 9;
   until fContext.SessionSequence <> 0;
   fContext.SessionSequenceStart := fContext.SessionSequence;
-  fContext.CrcSalt := Random32Not0; // from Lecuyer generator
-  TAesPrng.Main.FillRandom(fContext.CryptKey); // 128-bit strong crypto key
+  fContext.CrcSalt := Random32Not0; // from TLecuyer gsl_rng_taus2 generator
+  Random128(@fContext.CryptKey);    // unpredictable
   fAes.Init(fContext.CryptKey, 128, {avx=}false);
 end;
 
@@ -6468,13 +7133,13 @@ begin
         ECrypt.RaiseU('TBinaryCookieGenerator: Too Big Too Fat');
       MoveFast(tmp.buf^, cc.data, tmp.len);
     end;
-    cc.head.issued := UnixTimeMinimalUtc;
+    cc.head.issued := UnixTimeMinimalUtc; // valid until year 2152
     if TimeOutMinutes = 0 then
-      TimeOutMinutes := DefaultTimeOutMinutes;
+      TimeOutMinutes := fDefaultTimeOutMinutes;
     if TimeOutMinutes = 0 then // max 1 month expiration seems good enough
       TimeOutMinutes := 31 * 24 * 60;
     cc.head.expires := cc.head.issued + TimeOutMinutes * 60;
-    fSafe.Lock;
+    fSafe.Lock; // protect fAes instance and SessionSequence
     try
       inc(fContext.SessionSequence);
       inc(result, fContext.SessionSequence); // inc() to circumvent Delphi hint
@@ -6529,7 +7194,7 @@ begin
      (cc.head.expires <= Now32) then
     exit;
   dec(len, SizeOf(cc.head));
-  fSafe.Lock;
+  fSafe.Lock; // protect fAes instance
   try
     if not fAes.Reset(@cc.head.session, 12) or // unique sequence-based IV
        not fAes.Add_AAD(@cc.head.session, 3 * SizeOf(cardinal)) or
@@ -6786,7 +7451,7 @@ end;
 
 function TCryptRandomAesPrng.Get32: cardinal;
 begin
-  result := TAesPrng.Main.Random32;
+  result := TAesPrng.Main.Random32; // a CSPRNG is pointless for 32-bit anyway
 end;
 
 { TCryptRandomEntropy }
@@ -6850,7 +7515,7 @@ type
 
 procedure TCryptRandomLecuyerPrng.Get(dst: pointer; dstlen: PtrInt);
 begin
-  SharedRandom.Fill(dst, dstlen); // global Lecuyer's gsl_rng_taus2 generator
+  SharedRandom.Fill(dst, dstlen); // global TLecuyer gsl_rng_taus2 generator
 end;
 
 function TCryptRandomLecuyerPrng.Get32: cardinal;
@@ -9165,7 +9830,7 @@ function NextPemToDer(var P: PUtf8Char; Kind: PPemKind): TCertDer;
 var
   len: PtrInt;
   pem: PUtf8Char;
-  base64: TSynTempBuffer; // pem is small, so a 4KB temp buffer is fine enough
+  base64: TSynTempBuffer; // PEM are small, so a 4KB temp buffer is fine enough
 begin
   pem := ParsePem(P, kind, len, {excludemarkers=}true);
   if pem <> nil then

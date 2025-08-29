@@ -1885,7 +1885,7 @@ const
   PARAMREG_RESULT = REGR1;
   // 64-bit floating-point (double) registers
   {$define HAS_FPREG} // D0..D7
-  {$ifdef CPUARMHF}
+  // assume CPUARMHF target
   REGD0 = 1;
   REGD1 = 2;
   REGD2 = 3;
@@ -1896,7 +1896,6 @@ const
   REGD7 = 8;
   FPREG_FIRST = REGD0;
   FPREG_LAST  = REGD7;
-  {$endif CPUARMHF}
 {$endif CPUARM}
 
 {$ifdef CPUAARCH64}
@@ -4055,12 +4054,14 @@ begin
         1:
           if m^.Args[1].ValueType = imvBoolean then
             if PropNameEquals(m^.URI, 'CurrentFrame') then
+              // procedure CurrentFrame(isLast: boolean);
               fMethodIndexCurrentFrameCallback := nm;
         2:
           if (m^.Args[1].ValueType = imvInterface) and
              (m^.Args[1].ArgRtti.Info = TypeInfo(IInvokable)) and
              (m^.Args[2].ValueType = imvRawUtf8) and
              PropNameEquals(m^.URI, 'CallbackReleased') then
+// procedure CallbackReleased(const callback: IInvokable; const interfaceName: RawUtf8);
             fMethodIndexCallbackReleased := nm;
       end;
     if m^.ArgsResultIndex >= 0 then
