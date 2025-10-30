@@ -34,6 +34,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.buffers,
+  mormot.core.interfaces,
   mormot.crypt.core,
   mormot.crypt.ecc,
   mormot.crypt.secure, // IProtocol definition
@@ -342,6 +343,14 @@ type
     function Emit(out Dest: TDocVariantData; const EventName: RawUtf8;
       const Data: RawUtf8 = ''; const NameSpace: RawUtf8 = '';
       WaitTimeoutMS: integer = 0): boolean; overload;
+    /// disable a callback for a given packet ID
+    // - e.g. when a form is called and we don't need any notification any more
+    function Discard(aAckID: TSocketIOAckID;
+      const aNameSpace: RawUtf8 = ''): boolean; overload;
+    /// disable a given callback from any packet ID redirecting to it
+    // - e.g. when a form is called and we don't need any notification any more
+    function Discard(const aOnAck: TOnSocketIOAck;
+      const aNameSpace: RawUtf8 = ''): boolean; overload;
     /// refine the TSocketsIOClient process
     property Options: TSocketsIOClientOptions
       read fOptions write fOptions;
@@ -625,11 +634,14 @@ begin
     if InStream <> nil then
       body := body + StreamToRawByteString(InStream);
     Ctxt.PrepareDirect(url, method, header, body, DataType, '');
+    // see TRestHttpClientWebsockets.CallbackModeSetHeader
+    block := wscBlockWithAnswer;
     FindNameValue(header, 'SEC-WEBSOCKET-REST:', resthead);
-    if resthead = 'NonBlocking' then
-      block := wscNonBlockWithoutAnswer
-    else
-      block := wscBlockWithAnswer;
+    if resthead <> '' then
+      if resthead = 'NonBlocking' then
+        block := wscNonBlockWithoutAnswer
+      else if resthead = 'WithoutAnswer' then
+       block := wscBlockWithoutAnswer;
     result := fProcess.NotifyCallback(Ctxt, block);
     if IsContentTypeJsonU(Ctxt.OutContentType) then
       HeaderSetText(Ctxt.OutCustomHeaders) // OutContentType='' means JSON
@@ -702,7 +714,7 @@ begin
       aProtocol.OnBeforeIncomingFrame := fOnBeforeIncomingFrame;
       // send initial upgrade request
       RequestSendHeader(aWebSocketsURI, 'GET');
-      SharedRandom.Fill(@key, SizeOf(key)); // public and unique: use TLecuyer
+      Random128(@key); // unpredictable
       bin1 := BinToBase64(@key, SizeOf(key));
       SockSendLine(['Content-Length: 0'#13#10 +
                     'Connection: Upgrade'#13#10 +
@@ -1171,6 +1183,17 @@ begin
   fWaitEventAckID := SIO_NO_ACK
 end;
 
+function TSocketsIOClient.Discard(aAckID: TSocketIOAckID;
+  const aNameSpace: RawUtf8): boolean;
+begin
+  result := TSocketIORemoteNamespace(GetRemote(aNameSpace)).Discard(aAckID);
+end;
+
+function TSocketsIOClient.Discard(const aOnAck: TOnSocketIOAck;
+  const aNameSpace: RawUtf8): boolean;
+begin
+  result := TSocketIORemoteNamespace(GetRemote(aNameSpace)).Discard(aOnAck);
+end;
 
 
 { TWebSocketEngineIOClientProtocol }

@@ -1990,9 +1990,7 @@ procedure InitBsonObjectIDComputeNew;
 begin
   with GlobalBsonObjectID do
   begin
-    repeat
-      InitialCounter := SharedRandom.Generator.Next and COUNTER_MASK;  // 24-bit
-    until InitialCounter <> 0;
+    InitialCounter := SystemEntropy.Startup.c2 and COUNTER_MASK;       // 24-bit
     with Executable do
       SharedMachineID := crc32c(crc32c(
         0, pointer(Host), length(Host)), pointer(User), length(User)); // 24-bit
@@ -2387,7 +2385,7 @@ var
         end
         else
           inc(P);
-    P := GotoNextNotSpace(P + 1);
+    P := IgnoreAndGotoNextNotSpace(P);
     if EndOfObject <> nil then
       EndOfObject^ := P^;
     inc(P, ord(P^ <> #0));
@@ -2554,7 +2552,7 @@ var
     P := GotoNextNotSpace(Reg + RegLen + 1);
     if P^ <> ',' then
       exit; // $regex:"acme*.corp",$options:"i"}
-    P := GotoNextNotSpace(P + 1);
+    P := IgnoreAndGotoNextNotSpace(P);
     if P^ = '"' then
       inc(P);
     if PInt64(P)^ <> PInt64(@BSON_JSON_REGEX[1][4])^ then
@@ -2566,7 +2564,7 @@ var
     P := GotoNextNotSpace(P);
     if P^ <> ':' then
       exit;
-    P := GotoNextNotSpace(P + 1);
+    P := IgnoreAndGotoNextNotSpace(P);
     if P^ <> '"' then
       exit
     else
@@ -2838,10 +2836,9 @@ end;
 
 { TBsonElement }
 
-var
-  /// size (in bytes) of a BSON element
-  // - equals -1 for varying elements
-  BSON_ELEMENTSIZE: array[TBsonElementType] of integer = (
+const
+  // size (in bytes) of a BSON element- equals -1 for varying elements
+  BSON_ELEMENTSIZE: array[TBsonElementType] of ShortInt = (
     //betEOF, betFloat, betString, betDoc, betArray, betBinary,
     0, SizeOf(Double), -1, -1, -1, -1,
     //betDeprecatedUndefined, betObjectID, betBoolean, betDateTime,
@@ -2851,7 +2848,7 @@ var
     //betDeprecatedJSScope, betInt32, betTimestamp, betInt64, betDecimal128
     -1, SizeOf(integer), SizeOf(Int64), SizeOf(Int64), SizeOf(TDecimal128));
 
-  /// types which do not have an exact equivalency to a standard variant
+  // types which do not have an exact equivalency to a standard variant
   // type will be mapped as varUnknown - and will be changed into
   // BsonVariantType.VarType
   BSON_ELEMENTTYPES: array[TBsonElementType] of word = (

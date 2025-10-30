@@ -1257,6 +1257,27 @@ type
   // of available classes (see e.g. SynDBExplorer or sample 16)
   TSqlDBConnectionPropertiesClass = class of TSqlDBConnectionProperties;
 
+  /// define TSqlDBConnectionProperties internal flags
+  TSqlDBConnectionPropertiesFlag = (
+    cpfUseCache,
+    cpfStoreVoidStringAsNull,
+    cpfLogSqlStatementOnException,
+    cpfRollbackOnDisconnect,
+    cpfReconnectAfterConnectionError,
+    cpfConnectionTimeOutBackground,
+    cpfEnsureColumnNameUnique,
+    cpfFilterTableViewSchemaName,
+    cpfNoBlobBindArray,
+    cpfIsThreadSafe,
+    cpfVariantStringAsWideString,
+    cpfDeleteConnectionInOwnThread,
+    cpfArrayParamsAsBinary,
+    cpfSQliteUseMormotCollations,
+    cpfProxyHandleConnection);
+  /// store TSqlDBConnectionProperties internal flags
+  // - exposed as boolean properties for mORMot 1 and existing code compatibility
+  TSqlDBConnectionPropertiesFlags = set of TSqlDBConnectionPropertiesFlag;
+
   /// abstract class used to set Database-related properties
   // - handle e.g. the Database server location and connection parameters (like
   // UserID and password)
@@ -1266,32 +1287,27 @@ type
   // from TSqlDBConnectionThreadSafe to maintain one connection per thread
   TSqlDBConnectionProperties = class
   protected
+    fMainConnectionSafe: TLightLock; // topmost to ensure aarch64 alignment
+    fSharedTransactionsSafe: TLightLock;
+    fMainConnection: TSqlDBConnection;
+    fDbms: TSqlDBDefinition;
+    fBatchSendingAbilities: TSqlDBStatementCRUDs;
+    fDateTimeFirstChar: AnsiChar;
+    fFlags: TSqlDBConnectionPropertiesFlags;
+    fBatchMaxSentAtOnce: integer;
+    fLoggedSqlMaxSize: integer;
+    fConnectionTimeOutSecs: integer; // maps ConnectionTimeOutMinutes as secs
+    fStatementMaxMemory: PtrInt;
+    fEngineName: RawUtf8;
     fServerName: RawUtf8;
     fDatabaseName: RawUtf8;
     fPassWord: SpiUtf8;
     fUserID: RawUtf8;
     fForcedSchemaName: RawUtf8;
-    fMainConnection: TSqlDBConnection;
-    fSharedTransactionsSafe: TLightLock; // topmost to ensure aarch64 alignment
-    fBatchMaxSentAtOnce: integer;
-    fLoggedSqlMaxSize: integer;
-    fConnectionTimeOutTicks: Int64;
-    fOnBatchInsert: TOnBatchInsert;
-    fDbms: TSqlDBDefinition;
-    fBatchSendingAbilities: TSqlDBStatementCRUDs;
-    fUseCache, fStoreVoidStringAsNull, fLogSqlStatementOnException,
-    fRollbackOnDisconnect, fReconnectAfterConnectionError,
-    fEnsureColumnNameUnique, fFilterTableViewSchemaName,
-    fNoBlobBindArray, fIsThreadSafe: boolean;
-    {$ifndef UNICODE}
-    fVariantWideString: boolean;
-    {$endif UNICODE}
-    fDateTimeFirstChar: AnsiChar;
-    fStatementMaxMemory: PtrInt;
     fSqlGetServerTimestamp: RawUtf8;
-    fEngineName: RawUtf8;
     fOnProcess: TOnSqlDBProcess;
     fOnStatementInfo: TOnSqlDBInfo;
+    fOnBatchInsert: TOnBatchInsert;
     fStatementCacheReplicates: integer;
     fSqlCreateFieldMax: cardinal;
     fSqlCreateField: TSqlDBFieldTypeDefinition;
@@ -1301,7 +1317,10 @@ type
     fOnTableCreate: TOnTableCreate;
     fOnTableAddColumn: TOnTableAddColumn;
     fOnTableCreateMultiIndex: TOnTableCreateMultiIndex;
-    fMainConnectionLock: TOSLightLock; // = SRW lock or direct pthread mutex
+    procedure SetFlag(const flag: TSqlDBConnectionPropertiesFlag; const value: boolean);
+      {$ifdef HASINLINE}inline;{$endif}
+    function GetFlag(const flag: TSqlDBConnectionPropertiesFlag): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     procedure SetConnectionTimeOutMinutes(minutes: cardinal);
     function GetConnectionTimeOutMinutes: cardinal;
     // this default implementation just returns the fDbms value or dDefault
@@ -1462,36 +1481,37 @@ type
     /// get a thread-safe connection
     // - this default implementation will return the MainConnection shared
     // instance, so the provider should be thread-safe by itself
-    // - TSqlDBConnectionPropertiesThreadSafe will implement a per-thread
-    // connection pool, via an internal TSqlDBConnection pool, per thread
-    // if necessary (e.g. for OleDB, which expect one TOleDBConnection instance
-    // per thread)
+    // - TSqlDBConnectionPropertiesThreadSafe in tmThreadPool mode will implement
+    // a per-thread connection pool for efficient process with proper re-use
     function ThreadSafeConnection: TSqlDBConnection; virtual;
     /// release all existing connections
     // - can be called e.g. after a DB connection problem, to purge the
     // connection pool, and allow automatic reconnection
-    // - is called automatically if ConnectionTimeOutMinutes property is set
     // - warning: no connection shall still be used on the background (e.g. in
     // multi-threaded applications), or some unexpected border effects may occur
     procedure ClearConnectionPool; virtual;
-    /// specify a maximum period of inactivity after which all connections will
-    // be flushed and recreated, to avoid potential broken connections issues
+    /// specify a maximum period of inactivity after which any connection will
+    // be flushed and recreated, to avoid potential database issues
+    // - is 0 by default, and rely on the database to gracefully reconnect
     // - in practice, recreating the connections after a while is safe and
-    // won't slow done the process - on the contrary, it may help reducing the
+    // won't slow down the process - on the contrary, it may help reducing the
     // consumpted resources, and stabilize long running n-Tier servers
-    // - ThreadSafeConnection method will check for the last activity on this
-    // TSqlDBConnectionProperties instance, then call ClearConnectionPool
-    // to release all active connections if the idle time elapsed was too long
-    // - warning: no connection shall still be used on the background (e.g. in
-    // multi-threaded applications), or some unexpected issues may occur - for
-    // instance, ensure that your mORMot ORM server runs all its statements in
-    // blocking mode for both read and write:
-    // ! aServer.AcquireExecutionMode[execOrmGet] := am***;
-    // ! aServer.AcquireExecutionMode[execOrmWrite] := am***;
-    // here, safe blocking am*** modes are any mode but amUnlocked, i.e. either
-    // amLocked, amBackgroundThread or amMainThread
+    // - ThreadSafeConnection method will check for the last activity on each
+    // TSqlDBConnection, and release any deprecated instances in their own thread
+    // - ConnectionTimeOutBackground=true would make a global periodic search
+    // and release, but could make the whole process thread-unsafe
     property ConnectionTimeOutMinutes: cardinal
       read GetConnectionTimeOutMinutes write SetConnectionTimeOutMinutes;
+    /// force deprecation check of all connections
+    // - by default (false), each thread will check for ConnectionTimeOutMinutes
+    // idle connections, and recreate a new one for safety
+    // - set true so at most that every 32 seconds, NewThreadSafeStatement will
+    // check for deprecated connections in its all internal list and relase them
+    // - warning: this could lead to issues, especially in multi-threaded
+    // applications, and require e.g. amLocked/amBackgroundThread/amMainThread
+    // mode for TRestServer.AcquireExecutionMode[execOrmGet/execOrmWrite]
+    property ConnectionTimeOutBackground: boolean
+      index cpfConnectionTimeOutBackground read GetFlag write SetFlag;
     /// intercept connection errors at statement preparation and try to reconnect
     // - i.e. detect TSqlDBConnection.LastErrorWasAboutConnection in
     // TSqlDBConnection.NewStatementPrepared
@@ -1499,10 +1519,11 @@ type
     // multi-threaded applications), or some unexpected issues may occur - see
     // AcquireExecutionMode[] recommendations in ConnectionTimeOutMinutes
     property ReconnectAfterConnectionError: boolean
-      read fReconnectAfterConnectionError write fReconnectAfterConnectionError;
+      index cpfReconnectAfterConnectionError read GetFlag write SetFlag;
     /// create a new thread-safe statement
-    // - this method will call ThreadSafeConnection.NewStatement
+    // - this method just redirects to ThreadSafeConnection.NewStatement
     function NewThreadSafeStatement: TSqlDBStatement;
+      {$ifdef HASINLINE} inline; {$endif}
     /// create a new thread-safe statement from an internal cache (if any)
     // - will call ThreadSafeConnection.NewStatementPrepared
     // - this method should return a prepared statement instance on success
@@ -1851,8 +1872,8 @@ type
     property LoggedSqlMaxSize: integer
       read fLoggedSqlMaxSize write fLoggedSqlMaxSize;
     /// allow to log the SQL statement when any low-level ESqlDBException is raised
-    property LogSqlStatementOnException: boolean read
-      fLogSqlStatementOnException write fLogSqlStatementOnException;
+    property LogSqlStatementOnException: boolean
+      index cpfLogSqlStatementOnException read GetFlag write SetFlag;
     /// an optional Schema name to be used for SqlGetField() instead of UserID
     // - by default, UserID will be used as schema name, if none is specified
     // (i.e. if table name is not set as SCHEMA.TABLE)
@@ -1864,7 +1885,7 @@ type
     /// if GetTableNames/GetViewNames should only return the table names
     // starting with 'ForcedSchemaName.' prefix
     property FilterTableViewSchemaName: boolean
-      read fFilterTableViewSchemaName write fFilterTableViewSchemaName;
+      index cpfFilterTableViewSchemaName read GetFlag write SetFlag;
     /// TRUE if an internal cache of SQL statement should be used
     // - cache will be accessed for NewStatementPrepared() method only, by
     // returning ISqlDBStatement interface instances
@@ -1873,7 +1894,7 @@ type
     // - will cache only statements containing ? parameters or a SELECT with no
     // WHERE clause within
     property UseCache: boolean
-      read fUseCache write fUseCache;
+      index cpfUseCache read GetFlag write SetFlag;
     /// maximum bytes allowed for FetchAllToJSON/FetchAllToBinary methods
     // - if a result set exceeds this limit, an ESQLDBException is raised
     // - default is 512 shl 20, i.e. 512MB which is very high
@@ -1898,7 +1919,7 @@ type
     // is roll-backed before disconnection
     // - is set to TRUE by default
     property RollbackOnDisconnect: boolean
-      read fRollbackOnDisconnect write fRollbackOnDisconnect;
+      index cpfRollbackOnDisconnect read GetFlag write SetFlag;
     /// by default, result column names won't be checked for name unicity
     // - it is up to your SQL statement to return genuine columns
     // - ColumName() lookup will use O(1) brute force, so you should rather
@@ -1907,13 +1928,13 @@ type
     // names will be hashed for unicity (so will be slower at execution),
     // but will allow faster ColumnName() lookup
     property EnsureColumnNameUnique: boolean
-      read fEnsureColumnNameUnique write fEnsureColumnNameUnique;
+      index cpfEnsureColumnNameUnique read GetFlag write SetFlag;
     /// defines if '' string values are to be stored as SQL null
     // - by default, '' will be stored as ''
     // - but some DB engines (e.g. Jet or MS SQL) does not allow by default to
     // store '' values, but expect NULL to be stored instead
     property StoreVoidStringAsNull: boolean
-       read fStoreVoidStringAsNull write fStoreVoidStringAsNull;
+      index cpfStoreVoidStringAsNull read GetFlag write SetFlag;
     /// customize the ISO-8601 text format expected by the database provider
     // - is 'T' by default, as expected by the ISO-8601 standard
     // - will be changed e.g. for PostgreSQL, which expects ' ' instead
@@ -1923,7 +1944,7 @@ type
     /// defines if the engine does not support BindArray(ftBlob)
     // - only set for TSqlDBPostgresConnectionProperties by now
     property NoBlobBindArray: boolean
-      read fNoBlobBindArray write fNoBlobBindArray;
+      index cpfNoBlobBindArray read GetFlag write SetFlag;
     {$ifndef UNICODE}
     /// set to true to force all variant conversion to WideString instead of
     // the default faster AnsiString, for pre-Unicode version of Delphi
@@ -1943,7 +1964,7 @@ type
     // - if you want a RawUtf8 varString (as used e.g. within TDocVariantData),
     // use ISqlDBStatement.ColumnVariant/ColumnToVariant() with ForceUtf8=true
     property VariantStringAsWideString: boolean
-      read fVariantWideString write fVariantWideString;
+      index cpfVariantStringAsWideString read GetFlag write SetFlag;
     {$endif UNICODE}
     /// SQL statements what will be executed for each new connection, as typical
     // usage scenarios examples:
@@ -1967,17 +1988,18 @@ type
     fErrorMessage: RawUtf8;
     fServerTimestampOffset: TDateTime;
     fCacheSafe: TOSLightLock; // protect fCache - warning: not reentrant!
-    fCache: TRawUtf8List; // statements cache
+    fCache: TRawUtf8List;     // statements cache
     fCacheLast: RawUtf8;
     fCacheLastIndex: integer;
     fTotalConnectionCount: integer;
     fInternalProcessActive: integer;
     fTransactionCount: integer;
-    fLastAccessTicks: Int64;
+    fLastAccessTickSec: integer; // from GetTickSec - for IsOutdated()
+    fRollbackOnDisconnect: boolean;
     fOnProcess: TOnSqlDBProcess;
     fOwned: TObjectDynArray;
-    fRollbackOnDisconnect: boolean;
-    function IsOutdated(tix: Int64): boolean; // do not make virtual nor inline
+    function IsOutdated(secs: integer): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetInTransaction: boolean; virtual;
     function GetServerTimestamp: TTimeLog;
     function GetServerDateTime: TDateTime; virtual;
@@ -2133,6 +2155,17 @@ type
     scOnClient,
     scOnServer);
 
+  /// define all possible TSqlDBStatement internal flags
+  TSqlDBStatementFlag = (
+    dsfStripSemicolon,
+    dsfExpectResults,
+    dsfForceBlobAsNull,
+    dsfForceDateWithMS,
+    dsfShouldLogSQL);
+  /// store TSqlDBStatement internal flags
+  // - exposed as boolean properties for mORMot 1 and existing code compatibility
+  TSqlDBStatementFlags = set of TSqlDBStatementFlag;
+
   /// generic abstract class to implement a prepared SQL query
   // - inherited classes should implement the DB-specific connection in its
   // overridden methods, especially Bind*(), Prepare(), ExecutePrepared, Step()
@@ -2144,18 +2177,19 @@ type
     fColumnCount: integer;
     fTotalRowsRetrieved: integer;
     fCurrentRow: integer;
-    fStripSemicolon: boolean;
-    fExpectResults: boolean;
-    fForceBlobAsNull: boolean;
-    fForceDateWithMS: boolean;
     fDbms: TSqlDBDefinition;
+    fFlags: TSqlDBStatementFlags;
+    fCache: TSqlDBStatementCache;
     fSqlLogLevel: TSynLogLevel;
     fSql: RawUtf8;
-    fCache: TSqlDBStatementCache;
     fSqlLogLog: TSynLog;
     fSqlWithInlinedParams: RawUtf8;
     fSqlLogTimer: TPrecisionTimer;
     fSqlPrepared: RawUtf8;
+    procedure SetFlag(const flag: TSqlDBStatementFlag; const value: boolean);
+      {$ifdef HASINLINE}inline;{$endif}
+    function GetFlag(const flag: TSqlDBStatementFlag): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetSqlCurrent: RawUtf8;
     function GetSqlWithInlinedParams: RawUtf8;
     procedure ComputeSqlWithInlinedParams;
@@ -2191,6 +2225,8 @@ type
     function DoSqlLogBegin(Log: TSynLogFamily; Level: TSynLogLevel): TSynLog;
     function DoSqlLogEnd(Msg: PShortString): Int64;
     {$endif SYNDB_SILENCE}
+    property fExpectResults: boolean // internal compatibility wrapper
+      index dsfExpectResults read GetFlag write SetFlag;
   public
     /// create a statement instance
     constructor Create(aConnection: TSqlDBConnection); virtual;
@@ -2727,7 +2763,7 @@ type
     // - expectation may vary, depending on the SQL statement and the engine
     // - default is true
     property StripSemicolon: boolean
-      read fStripSemicolon write fStripSemicolon;
+      index dsfStripSemicolon read GetFlag write SetFlag;
   end;
 
 
@@ -2738,12 +2774,13 @@ function ToText(c: TSqlDBStatementCache): ShortString; overload;
 
 type
   /// abstract connection created from TSqlDBConnectionProperties
-  // - this overridden class will defined an hidden thread ID, to ensure
-  // that one connection will be create per thread
+  // - we will rely on efficient TSynLog.ThreadIndex round-robin slot numbers
+  // to properly implement thread-safety and connection reuse with no TThreadID
   // - e.g. OleDB, ODBC and Oracle connections will inherit from this class
   TSqlDBConnectionThreadSafe = class(TSqlDBConnection)
-  protected
-    fThreadID: TThreadID;
+  public
+    /// finalize this connection, and remove it from any internal pool
+    destructor Destroy; override;
   end;
 
   /// threading modes set to TSqlDBConnectionPropertiesThreadSafe.ThreadingMode
@@ -2755,16 +2792,21 @@ type
     tmThreadPool,
     tmMainConnection);
 
-  /// connection properties which will implement an internal Thread-Safe
-  // connection pool
+  /// connection properties with an internal Thread-Safe connection pool
+  // - will use TSynLog.ThreadIndex to maintain the internal list of active
+  // connections, with proper deprecation and TSynLog.NotifyThreadEnded support
+  // - initial implementation used an explicit and confusing EndCurrentThread
+  // which is not needed any more since is part of TSynLog.NotifyThreadEnded,
+  // and allows efficient reuse between short-living threads
   TSqlDBConnectionPropertiesThreadSafe = class(TSqlDBConnectionProperties)
   protected
-    fConnectionPool: TSynObjectListLightLocked;
-    fConnectionPoolDeprecatedTix: cardinal;
+    fConnectionPoolSafe: TLightLock; // for fConnectionPool[TSynLog.ThreadIndex]
+    fConnectionPool: array of TSqlDBConnectionThreadSafe;
+    fConnectionPoolMin, fConnectionPoolMax, fConnectionPoolCount: integer;
+    fConnectionPoolDeprecatedTix32: integer;
     fThreadingMode: TSqlDBConnectionPropertiesThreadSafeThreadingMode;
-    fDeleteConnectionInOwnThread: boolean;
-    /// returns -1 if none was defined yet
-    function GetLockedPerThreadIndex: PtrInt;
+    procedure DeleteDeprecated(secs: integer);
+    procedure RemoveFromPool(conn: TSqlDBConnectionThreadSafe);
     /// overridden method to properly handle multi-thread
     function GetMainConnection: TSqlDBConnection; override;
   public
@@ -2774,8 +2816,9 @@ type
     /// release related memory, and all per-thread connections
     destructor Destroy; override;
     /// get a thread-safe connection
-    // - this overridden implementation will define a per-thread TSqlDBConnection
-    // connection pool, via an internal  pool
+    // - tmThreadPool will use its internal fConnectionPool[TSynLog.ThreadIndex]
+    // but requires TSynLog.NotifyThreadEnded to be eventually called (which is
+    // the case when used with our mormot.rest.* and mormot.threads.* units)
     function ThreadSafeConnection: TSqlDBConnection; override;
     /// release all existing connections
     // - this overridden implementation will release all per-thread
@@ -2783,28 +2826,9 @@ type
     // - warning: no connection shall still be used on the background (e.g. in
     // multi-threaded applications), or some unexpected border effects may occur
     procedure ClearConnectionPool; override;
-    /// you can call this method just before a thread is finished to ensure
-    // that the associated Connection will be released
-    // - could be used e.g. in a try...finally block inside a TThread.Execute
-    // overridden method
-    // - could be used e.g. to call CoUnInitialize from thread in which
-    // CoInitialize was made, for instance via a method defined as such:
-    // ! procedure TMyServer.OnHttpThreadTerminate(Sender: TObject);
-    // ! begin
-    // !   fMyConnectionProps.EndCurrentThread;
-    // ! end;
-    // - this method shall be called from the thread about to be terminated: e.g.
-    // if you call it from the main thread, it may fail to release resources
-    // - see also the DeleteConnectionInOwnThread property
-    // - within the mORMot server, mormot.orm.sql unit will call this method
-    // for every terminating thread created for TRestServerNamedPipeResponse
-    // or TRestHttpServer multi-thread process
-    procedure EndCurrentThread; virtual;
-    /// set this property if you want to disable the per-thread connection pool
-    // - to be used e.g. in database embedded mode (SQLite3/FireBird), when
+    /// use this property if you want to disable the tmThreadPool default mode
+    // - could be set e.g. in database embedded mode (SQLite3/FireBird), when
     // multiple connections may break stability and decrease performance
-    // - see TSqlDBConnectionPropertiesThreadSafeThreadingMode for the
-    // possible values
     property ThreadingMode: TSqlDBConnectionPropertiesThreadSafeThreadingMode
       read fThreadingMode write fThreadingMode;
     /// by default, deprecated connections after ConnectionTimeOutMinutes will
@@ -2814,7 +2838,10 @@ type
     // some non-threadsafe database providers may require to free the connection
     // in the very same thread which created it - see also EndCurrentThread
     property DeleteConnectionInOwnThread: boolean
-      read fDeleteConnectionInOwnThread write fDeleteConnectionInOwnThread;
+      index cpfDeleteConnectionInOwnThread read GetFlag write SetFlag;
+    /// how many TSqlDBConnectionThreadSafe are currently in tmThreadPool mode
+    property ConnectionPoolCount: integer
+      read fConnectionPoolCount;
   end;
 
   /// a structure used to store a standard binding parameter
@@ -3378,7 +3405,7 @@ begin
   result := false;
   if Json = nil then
     exit;
-  p.InitParser(Json, nil, [], nil, nil, nil);
+  p.InitParser(Json);
   if not p.ParseArray then
     exit;
   n := JsonArrayCount(p.Json); // prefetch input and compute dest length
@@ -3468,14 +3495,12 @@ constructor TSqlDBConnectionProperties.Create(const aServerName, aDatabaseName,
 var
   db: TSqlDBDefinition;
 begin
-  fMainConnectionLock.Init; // mandatory for TOSLightLock
   fServerName := aServerName;
   fDatabaseName := aDatabaseName;
   fUserID := aUserID;
   fPassWord := aPassWord;
   fEngineName := EngineName;
-  fRollbackOnDisconnect := true; // enabled by default
-  fUseCache := true;
+  fFlags := fFlags + [cpfRollbackOnDisconnect, cpfUseCache];
   fLoggedSqlMaxSize := 2048; // log up to 2KB of inlined SQL by default
   fStatementMaxMemory := 512 shl 20; // fetch to JSON/Binary up to 512MB
   SetInternalProperties; // virtual method used to override default parameters
@@ -3500,7 +3525,7 @@ begin
   case db of
     dMSSQL,
     dJet:
-      fStoreVoidStringAsNull := true;
+      StoreVoidStringAsNull := true;
   end;
   if byte(fBatchSendingAbilities) = 0 then // if not already handled by driver
     case db of
@@ -3534,7 +3559,6 @@ begin
   fMainConnection.Free;
   FillZero(fPassword);
   inherited;
-  fMainConnectionLock.Done; // mandatory for TOSLightLock
 end;
 
 function TSqlDBConnectionProperties.Execute(const aSql: RawUtf8;
@@ -3608,8 +3632,11 @@ end;
 
 function TSqlDBConnectionProperties.PrepareInlined(const SqlFormat: RawUtf8;
   const Args: array of const; ExpectResults: boolean): ISqlDBStatement;
+var
+  sql: RawUtf8;
 begin
-  result := PrepareInlined(FormatUtf8(SqlFormat, Args), ExpectResults);
+  FormatUtf8(SqlFormat, Args, sql);
+  result := PrepareInlined(sql, ExpectResults);
 end;
 
 function TSqlDBConnectionProperties.ExecuteInlined(const aSql: RawUtf8;
@@ -3629,42 +3656,61 @@ end;
 
 function TSqlDBConnectionProperties.ExecuteInlined(const SqlFormat: RawUtf8;
   const Args: array of const; ExpectResults: boolean): ISqlDBRows;
+var
+  sql: RawUtf8;
 begin
-  result := ExecuteInlined(FormatUtf8(SqlFormat, Args), ExpectResults);
+  FormatUtf8(SqlFormat, Args, sql);
+  result := ExecuteInlined(sql, ExpectResults);
+end;
+
+procedure TSqlDBConnectionProperties.SetFlag(
+  const flag: TSqlDBConnectionPropertiesFlag; const value: boolean);
+begin
+  if value then
+    include(fFlags, flag)
+  else
+    exclude(fFlags, flag);
+end;
+
+function TSqlDBConnectionProperties.GetFlag(
+  const flag: TSqlDBConnectionPropertiesFlag): boolean;
+begin
+  result := flag in fFlags;
 end;
 
 procedure TSqlDBConnectionProperties.SetConnectionTimeOutMinutes(minutes: cardinal);
 begin
-  fConnectionTimeOutTicks := minutes * MilliSecsPerMin;
+  fConnectionTimeOutSecs := minutes * SecsPerMin;
 end;
 
 function TSqlDBConnectionProperties.GetConnectionTimeOutMinutes: cardinal;
 begin
-  result := fConnectionTimeOutTicks div MilliSecsPerMin;
+  result := fConnectionTimeOutSecs div SecsPerMin;
 end;
 
 function TSqlDBConnectionProperties.GetMainConnection: TSqlDBConnection;
 var
-  tix: Int64;
+  secs: integer;
 begin
-  tix := fConnectionTimeOutTicks;
-  if tix <> 0 then
-    tix := GetTickCount64;
-  fMainConnectionLock.Lock;
+  secs := 0;
+  if fConnectionTimeOutSecs <> 0 then
+    secs := GetTickSec;
+  fMainConnectionSafe.Lock;
   result := fMainConnection;
   if (result = nil) or
-     ((tix <> 0) and
-      result.IsOutdated(tix)) then
-  begin
+     ((secs <> 0) and // recreate after ConnectionTimeOutMinutes idle
+      result.IsOutdated(secs)) then
     try
       FreeAndNilSafe(fMainConnection);
-      result := NewConnection; // fast enough method
+      fMainConnection := NewConnection; // fast enough method
+      result := fMainConnection;
     except
       result := nil;
     end;
-    fMainConnection := result;
-  end;
-  fMainConnectionLock.UnLock;
+  if (result <> nil) and
+     (secs <> 0) then
+    result.fLastAccessTickSec := secs;
+  fMainConnectionSafe.UnLock;
 end;
 
 function TSqlDBConnectionProperties.{%H-}NewConnection: TSqlDBConnection;
@@ -3679,9 +3725,9 @@ end;
 
 procedure TSqlDBConnectionProperties.ClearConnectionPool;
 begin
-  fMainConnectionLock.Lock;
+  fMainConnectionSafe.Lock;
   FreeAndNilSafe(fMainConnection); // contains its own try..finally
-  fMainConnectionLock.UnLock;
+  fMainConnectionSafe.UnLock;
 end;
 
 function TSqlDBConnectionProperties.NewThreadSafeStatement: TSqlDBStatement;
@@ -3699,9 +3745,11 @@ end;
 function TSqlDBConnectionProperties.NewThreadSafeStatementPrepared(
   const SqlFormat: RawUtf8; const Args: array of const; ExpectResults,
   RaiseExceptionOnError: boolean): ISqlDBStatement;
+var
+  sql: RawUtf8;
 begin
-  result := NewThreadSafeStatementPrepared(FormatUtf8(SqlFormat, Args),
-    ExpectResults, RaiseExceptionOnError);
+  FormatUtf8(SqlFormat, Args, sql);
+  result := NewThreadSafeStatementPrepared(sql, ExpectResults, RaiseExceptionOnError);
 end;
 
 function TSqlDBConnectionProperties.SharedTransaction(SessionID: cardinal;
@@ -3819,7 +3867,7 @@ end;
 
 function TSqlDBConnectionProperties.IsCacheable(P: PUtf8Char): boolean;
 begin
-  result := fUseCache and
+  result := (cpfUseCache in fFlags) and
             IsCacheableDML(P);
 end;
 
@@ -3852,34 +3900,29 @@ end;
 class function TSqlDBConnectionProperties.GetFieldDefinition(
   const Column: TSqlDBColumnDefine): RawUtf8;
 begin
-  with Column do
-  begin
-    FormatUtf8('% [%', [ColumnName, ColumnTypeNative], result);
-    if (ColumnLength <> 0) or
-       (Column.ColumnPrecision <> 0) or
-       (Column.ColumnScale <> 0) then
-      result := FormatUtf8('% % % %]',
-        [result, ColumnLength, ColumnPrecision, ColumnScale])
-    else
-      AppendShortToUtf8(']', result);
-    if ColumnIndexed then
-      AppendShortToUtf8(' *', result);
-  end;
+  FormatUtf8('% [%', [Column.ColumnName, Column.ColumnTypeNative], result);
+  if (Column.ColumnLength <> 0) or
+     (Column.ColumnPrecision <> 0) or
+     (Column.ColumnScale <> 0) then
+    result := FormatUtf8('% % % %]',
+      [result, Column.ColumnLength, Column.ColumnPrecision, Column.ColumnScale])
+  else
+    AppendShortToUtf8(']', result);
+  if Column.ColumnIndexed then
+    AppendShortToUtf8(' *', result);
 end;
 
 class function TSqlDBConnectionProperties.GetFieldORMDefinition(
   const Column: TSqlDBColumnDefine): RawUtf8;
 begin
   // 'Name: RawUtf8 index 20 read fName write fName;';
-  with Column do
-  begin
-    FormatUtf8('property %: %',
-      [ColumnName, SqlDBFIELDTYPE_TO_DELPHITYPE[ColumnType]], result);
-    if (ColumnType = ftUtf8) and
-       (ColumnLength > 0) then
-      result := FormatUtf8('% index %', [result, ColumnLength]);
-    result := FormatUtf8('% read f% write f%;', [result, ColumnName, ColumnName]);
-  end;
+  FormatUtf8('property %: %',
+    [Column.ColumnName, SqlDBFIELDTYPE_TO_DELPHITYPE[Column.ColumnType]], result);
+  if (Column.ColumnType = ftUtf8) and
+     (Column.ColumnLength > 0) then
+    result := FormatUtf8('% index %', [result, Column.ColumnLength]);
+  result := FormatUtf8('% read f% write f%;',
+    [result, Column.ColumnName, Column.ColumnName]);
 end;
 
 var
@@ -5684,6 +5727,21 @@ end;
 
 { TSqlDBStatement }
 
+procedure TSqlDBStatement.SetFlag(
+  const flag: TSqlDBStatementFlag; const value: boolean);
+begin
+  if value then
+    include(fFlags, flag)
+  else
+    exclude(fFlags, flag);
+end;
+
+function TSqlDBStatement.GetFlag(const flag: TSqlDBStatementFlag): boolean;
+begin
+  result := flag in fFlags;
+end;
+
+
 procedure TSqlDBStatement.Bind(Param: integer; const Data: TSqlVar;
   IO: TSqlDBParamInOutType);
 begin
@@ -5976,29 +6034,29 @@ end;
 
 function TSqlDBStatement.GetForceBlobAsNull: boolean;
 begin
-  result := fForceBlobAsNull;
+  result := GetFlag(dsfForceBlobAsNull);
 end;
 
 procedure TSqlDBStatement.SetForceBlobAsNull(value: boolean);
 begin
-  fForceBlobAsNull := value;
+  SetFlag(dsfForceBlobAsNull, value);
 end;
 
 function TSqlDBStatement.GetForceDateWithMS: boolean;
 begin
-  result := fForceDateWithMS;
+  result := GetFlag(dsfForceDateWithMS);
 end;
 
 procedure TSqlDBStatement.SetForceDateWithMS(value: boolean);
 begin
-  fForceDateWithMS := value;
+  SetFlag(dsfForceDateWithMS, value);
 end;
 
 constructor TSqlDBStatement.Create(aConnection: TSqlDBConnection);
 begin
   inherited Create;
   fConnection := aConnection;
-  fStripSemicolon := true;
+  SetFlag(dsfStripSemicolon, true);
   if aConnection <> nil then
     fDbms := aConnection.fProperties.GetDbms;
 end;
@@ -6179,7 +6237,7 @@ begin
         Value.VText := pointer(Temp);
       end;
     ftBlob:
-      if fForceBlobAsNull then
+      if dsfForceBlobAsNull in fFlags then
       begin
         Value.VBlob := nil;
         Value.VBlobLen := 0;
@@ -6214,7 +6272,7 @@ begin // default implementation (never called in practice)
       ftDate:
         begin
           W.Add('"');
-          W.AddDateTime(ColumnDateTime(col), fForceDateWithMS);
+          W.AddDateTime(ColumnDateTime(col), dsfForceDateWithMS in fFlags);
           W.Add('"');
         end;
       ftUtf8:
@@ -6227,7 +6285,7 @@ begin // default implementation (never called in practice)
           W.Add('"');
         end;
       ftBlob:
-        if fForceBlobAsNull then
+        if dsfForceBlobAsNull in fFlags then
           W.AddNull
         else
         begin
@@ -6393,7 +6451,7 @@ begin
      (self = nil) or
      (ColumnCount = 0) then
     exit;
-  fForceBlobAsNull := true;
+  SetForceBlobAsNull(true);
   if Tab then
     CommaSep := #9;
   FMax := ColumnCount - 1;
@@ -6686,8 +6744,11 @@ end;
 
 procedure TSqlDBStatement.Execute(const SqlFormat: RawUtf8;
   ExpectResults: boolean; const Args, Params: array of const);
+var
+  sql: RawUtf8;
 begin
-  Execute(FormatUtf8(SqlFormat, Args), ExpectResults, Params);
+  FormatUtf8(SqlFormat, Args, sql);
+  Execute(sql, ExpectResults, Params);
 end;
 
 function TSqlDBStatement.UpdateCount: integer;
@@ -6844,7 +6905,7 @@ begin
   begin
     if Msg = nil then
     begin
-      if not fExpectResults then
+      if not (dsfExpectResults in fFlags) then
       begin
         AppendShort(' wr=', tmp);
         AppendShortCardinal(UpdateCount, tmp);
@@ -7080,8 +7141,8 @@ end;
 procedure TSqlDBStatement.ExecutePrepared;
 begin
   if (fConnection <> nil) and
-     (fConnection.fProperties.fConnectionTimeOutTicks <> 0) then
-    fConnection.fLastAccessTicks := GetTickCount64;
+     (fConnection.fProperties.fConnectionTimeOutSecs <> 0) then
+    fConnection.fLastAccessTickSec := GetTickSec;
   // a do-nothing default method
 end;
 
@@ -7297,7 +7358,7 @@ end;
 function TSqlDBConnection.GetThreadOwned(aClass: TClass): pointer;
 begin
   if (self = nil) or
-     not fProperties.fIsThreadSafe then
+     not (cpfIsThreadSafe in fProperties.fFlags) then
     result := nil
   else
   begin
@@ -7310,33 +7371,21 @@ end;
 function TSqlDBConnection.SetThreadOwned(aObject: TObject): pointer;
 begin
   if (self = nil) or
-     not fProperties.fIsThreadSafe then
+     not (cpfIsThreadSafe in fProperties.fFlags) then
     ESqlDBException.RaiseUtf8('Unsupported %.SetThreadOwned', [self]);
   result := aObject;
   if result <> nil then
     PtrArrayAdd(fOwned, aObject);
 end;
 
-function TSqlDBConnection.IsOutdated(tix: Int64): boolean;
-label
-  old;
-begin
-  if (self = nil) or
-     (fProperties.fConnectionTimeOutTicks = 0) then
-    result := false
-  else if fLastAccessTicks < 0 then
-    // connection release was forced by ClearConnectionPool
-    goto old
-  else if (fLastAccessTicks = 0) or
-          (tix - fLastAccessTicks < fProperties.fConnectionTimeOutTicks) then
-  begin
-    // brand new connection, or active enough connection
-    fLastAccessTicks := tix;
-    result := false;
-  end
-  else
-    // notify connection is clearly outdated
-old:result := true;
+function TSqlDBConnection.IsOutdated(secs: integer): boolean;
+var
+  last: integer;
+begin // caller ensured self <> nil and secs <> 0 and timeout <> 0
+  last := fLastAccessTickSec;
+  result := (last < 0) or       // -1 = deprecated by ClearConnectionPool
+            ((last <> 0) and    //  0 = new connection
+             (secs - last >= fProperties.fConnectionTimeOutSecs)); // too idle
 end;
 
 function TSqlDBConnection.GetInTransaction: boolean;
@@ -7710,101 +7759,34 @@ end;
 
 { ************ Parent Classes for Thread-Safe and Parametrized Connections }
 
-{ TSqlDBConnectionPropertiesThreadSafe }
+{ TSqlDBConnectionThreadSafe }
 
-procedure TSqlDBConnectionPropertiesThreadSafe.ClearConnectionPool;
-var
-  i: PtrInt;
+destructor TSqlDBConnectionThreadSafe.Destroy;
 begin
-  fConnectionPool.Safe.WriteLock;
-  try
-    if fDeleteConnectionInOwnThread then
-    begin
-      // mark all connections as deprecated - Delete() will be done later on, in
-      // the proper thread (some providers may require to keep the same thread)
-      if fMainConnection <> nil then
-        fMainConnection.fLastAccessTicks := -1; // force IsOutdated()=true
-      for i := 0 to fConnectionPool.Count - 1 do
-        TSqlDBConnectionThreadSafe(fConnectionPool.List[i]).
-          fLastAccessTicks := -1;
-    end
-    else
-    begin
-      // we can delete all existing connections now
-      fMainConnectionLock.Lock;
-      FreeAndNilSafe(fMainConnection);
-      fMainConnectionLock.UnLock;
-      fConnectionPool.ClearFromLast; // to use FreeAndNilSafe
-    end;
-    fConnectionPoolDeprecatedTix := 0; // trigger ThreadSafeConnection() release
-  finally
-    fConnectionPool.Safe.WriteUnLock;
-  end;
+  if fProperties <> nil then
+    (fProperties as TSqlDBConnectionPropertiesThreadSafe).RemoveFromPool(self);
+  inherited Destroy;
 end;
+
+
+{ TSqlDBConnectionPropertiesThreadSafe }
 
 constructor TSqlDBConnectionPropertiesThreadSafe.Create(
   const aServerName, aDatabaseName, aUserID, aPassWord: RawUtf8);
 begin
-  fIsThreadSafe := true;
-  fConnectionPool := TSynObjectListLightLocked.Create;
+  include(fFlags, cpfIsThreadSafe);
+  fConnectionPoolMax := -1;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
 end;
 
-threadvar // do not publish for compilation within Delphi packages
-  PerThreadConnectionIndex: integer; // for GetLockedPerThreadIndex O(1) lookup
-
-function TSqlDBConnectionPropertiesThreadSafe.GetLockedPerThreadIndex: PtrInt;
-var
-  id: TThreadID;
-  conn: ^TSqlDBConnectionThreadSafe;
-begin
-  // caller made fConnectionPool.Safe.ReadOnlyLock or WriteLock
-  if self <> nil then
-  begin
-    // we just search for the TThreadID and won't check for IsOutdated()
-    id := GetCurrentThreadId;
-    // most of the time, we have the index in the threadvar
-    result := PerThreadConnectionIndex;
-    if (PtrUInt(result) < PtrUInt(fConnectionPool.Count)) and
-       (TSqlDBConnectionThreadSafe(fConnectionPool.List[result]).
-         fThreadID = id) then
-        exit;
-    // search for this TThreadID connection (should almost never happen)
-    conn := pointer(fConnectionPool.List);
-    for result := 0 to fConnectionPool.Count - 1 do
-      if conn^.fThreadID = id then
-      begin
-        PerThreadConnectionIndex := result;
-        exit;
-      end
-      else
-        inc(conn);
-  end;
-  result := -1;
-end;
-
 destructor TSqlDBConnectionPropertiesThreadSafe.Destroy;
-begin
-  inherited Destroy; // do MainConnection.Free
-  fConnectionPool.Free;
-end;
-
-procedure TSqlDBConnectionPropertiesThreadSafe.EndCurrentThread;
 var
-  i: integer;
+  i: PtrInt;
 begin
-  fConnectionPool.Safe.WriteLock;
-  try
-    // do nothing if this thread has no active connection
-    i := GetLockedPerThreadIndex;
-    if i >= 0 then
-    begin
-      fConnectionPool.Delete(i); // release thread's TSqlDBConnection instance
-      PerThreadConnectionIndex := -1;
-    end;
-  finally
-    fConnectionPool.Safe.WriteUnLock;
-  end;
+  for i := fConnectionPoolMin to fConnectionPoolMax do
+    if fConnectionPool[i] <> nil then
+      FreeAndNilSafe(fConnectionPool[i]);
+  inherited Destroy; // do MainConnection.Free
 end;
 
 function TSqlDBConnectionPropertiesThreadSafe.GetMainConnection: TSqlDBConnection;
@@ -7812,71 +7794,159 @@ begin
   result := ThreadSafeConnection;
 end;
 
-function TSqlDBConnectionPropertiesThreadSafe.ThreadSafeConnection: TSqlDBConnection;
+procedure TSqlDBConnectionPropertiesThreadSafe.ClearConnectionPool;
 var
   i: PtrInt;
-  tix: Int64;
-  tix32: cardinal;
+  delete: TObjectDynArray; // outside non-reentrant lock
+  deletecount: integer;
+  log: ISynLog;
+begin
+  SynDBLog.EnterLocal(log, self, 'ClearConnectionPool');
+  if DeleteConnectionInOwnThread then
+  begin
+    // mark all connections as deprecated - Destroy will be done later on, in
+    // the proper thread (some providers may require to keep the same thread)
+    fMainConnectionSafe.Lock;
+    if fMainConnection <> nil then
+      fMainConnection.fLastAccessTickSec := -1; // force IsOutdated()=true
+    fMainConnectionSafe.UnLock;
+    fConnectionPoolSafe.Lock;
+    try
+      for i := fConnectionPoolMin to fConnectionPoolMax do
+        if fConnectionPool[i] <> nil then
+          fConnectionPool[i].fLastAccessTickSec := -1;
+    finally
+      fConnectionPoolSafe.UnLock;
+    end;
+    fConnectionPoolDeprecatedTix32 := 0; // trigger DeleteDeprecated()
+  end
+  else
+  begin
+    // we can delete all existing connections now
+    inherited ClearConnectionPool; // FreeAndNilSafe(fMainConnection)
+    deletecount := 0;
+    fConnectionPoolSafe.Lock;
+    try
+      for i := fConnectionPoolMin to fConnectionPoolMax do
+        if fConnectionPool[i] <> nil then
+          ObjArrayAddCount(delete, fConnectionPool[i], deletecount);
+    finally
+      fConnectionPoolSafe.UnLock;
+    end;
+    if deletecount = 0 then
+      exit;
+    if Assigned(log) then
+      log.Log(sllTrace, 'ClearConnectionPool: frompool=%', [deletecount], self);
+    ObjArrayClear(delete, {continueonexc=}true, @deletecount);
+  end;
+end;
+
+procedure TSqlDBConnectionPropertiesThreadSafe.RemoveFromPool(
+  conn: TSqlDBConnectionThreadSafe);
+var
+  i: PtrInt;
+begin // called from TSqlDBConnectionThreadSafe.Destroy
+  fConnectionPoolSafe.Lock;
+  try
+    for i := fConnectionPoolMin to fConnectionPoolMax do
+      if fConnectionPool[i] = conn then
+      begin
+        fConnectionPool[i] := nil;
+        dec(fConnectionPoolCount);
+        if fConnectionPoolCount = 0 then
+        begin
+          fConnectionPoolMin := 0; // reset range
+          fConnectionPoolMax := -1;
+        end;
+        break;
+      end;
+  finally
+    fConnectionPoolSafe.UnLock;
+  end;
+end;
+
+procedure TSqlDBConnectionPropertiesThreadSafe.DeleteDeprecated(secs: integer);
+var
+  i: PtrInt;
+  delete: TObjectDynArray; // outside non-reentrant lock
+  deletecount: integer;
+  log: ISynLog;
+begin // called at most every 32 seconds - ensured timeout <> 0 and secs <> 0
+  if fConnectionPoolCount = 0 then
+    exit;
+  deletecount := 0;
+  fConnectionPoolSafe.Lock;
+  try
+    for i := fConnectionPoolMin to fConnectionPoolMax do
+      if (fConnectionPool[i] <> nil) and
+         fConnectionPool[i].IsOutdated(secs) then
+        ObjArrayAddCount(delete, fConnectionPool[i], deletecount);
+  finally
+    fConnectionPoolSafe.UnLock;
+  end;
+  if deletecount = 0 then
+    exit;
+  SynDBLog.EnterLocal(log, 'DeleteDeprecated=%', [deletecount], self);
+  ObjArrayClear(delete, {continueonexc=}true, @deletecount);
+end;
+
+function TSqlDBConnectionPropertiesThreadSafe.ThreadSafeConnection: TSqlDBConnection;
+var
+  secs: integer;
+  ndx: PtrInt;
 begin
   case fThreadingMode of
     tmThreadPool:
       begin
-        // first delete any deprecated connection(s) - every 16 seconds
-        tix := fConnectionTimeOutTicks;
-        if tix <> 0 then
+        // first delete any deprecated connection(s) - check every 32 seconds
+        secs := 0;
+        if fConnectionTimeOutSecs <> 0 then
         begin
-          tix := GetTickCount64;
-          if not fDeleteConnectionInOwnThread then
+          secs := GetTickSec;
+          if ConnectionTimeOutBackground and // disabled by default
+             (not (cpfDeleteConnectionInOwnThread in fFlags)) and
+             (fConnectionPoolDeprecatedTix32 <> secs shr 5) then
           begin
-            tix32 := tix shr 14; // search every 16.384 seconds
-            if fConnectionPoolDeprecatedTix <> tix32 then
-            begin
-              fConnectionPoolDeprecatedTix := tix32;
-              fConnectionPool.Safe.WriteLock;
-              try
-                i := 0;
-                while i < fConnectionPool.Count do
-                  if TSqlDBConnectionThreadSafe(fConnectionPool.List[i]).
-                        IsOutdated(tix) then
-                    fConnectionPool.Delete(i)
-                  else
-                    inc(i);
-              finally
-                fConnectionPool.Safe.WriteUnLock;
-              end;
-            end;
+            fConnectionPoolDeprecatedTix32 := secs shr 5;
+            DeleteDeprecated(secs);
           end;
         end;
         // search for an existing connection
         result := nil;
-        fConnectionPool.Safe.ReadLock; // concurrent non blocking search
-        i := GetLockedPerThreadIndex;
-        if i >= 0 then
-          result := fConnectionPool.List[i];
-        fConnectionPool.Safe.ReadUnLock;
-        // is this connection not deprecated?
+        ndx := TSynLog.ThreadIndex; // efficient slots thread list with reuse
+        fConnectionPoolSafe.Lock;
+        if (ndx >= fConnectionPoolMin) and
+           (ndx <= fConnectionPoolMax) then
+          result := fConnectionPool[ndx]; // O(1) lookup
+        fConnectionPoolSafe.UnLock;
+        // is this connection deprecated?
         if result <> nil then
-          if (result.fLastAccessTicks < 0) or // from ClearConnectionPool
-             ((tix <> 0) and
-              result.IsOutdated(tix)) then
-            // make fConnectionPool.Delete to release this old instance
-            EndCurrentThread
+          if (result.fLastAccessTickSec < 0) or // from ClearConnectionPool
+             ((secs <> 0) and
+              result.IsOutdated(secs)) then
+            FreeAndNilSafe(result) // release this deprecated idle connection
           else
-            // we found a valid connection for this TThreadID
-            exit;
+          begin
+            if secs <> 0 then
+              result.fLastAccessTickSec := secs; // mark for IsOutDated()
+            exit; // valid connection for this thread
+          end;
         // we need to (re)create a new connection for this thread
         result := NewConnection; // run outside of the lock (even if fast)
-        (result as TSqlDBConnectionThreadSafe).fThreadID := GetCurrentThreadId;
-        fConnectionPool.Safe.WriteLock;
-        try
-          i := fConnectionPool.Add(result)
-        finally
-          fConnectionPool.Safe.WriteUnLock;
-        end;
-        PerThreadConnectionIndex := i; // store in a threadvar for O(1) lookup
+        // store in fConnectionPool[] internal list
+        fConnectionPoolSafe.Lock;
+        if ndx < fConnectionPoolMin then
+          fConnectionPoolMin := ndx;
+        if ndx > fConnectionPoolMax then
+          fConnectionPoolMax := ndx;
+        if ndx >= length(fConnectionPool) then
+          SetLength(fConnectionPool, ndx + 32);
+        fConnectionPool[ndx] := TSqlDBConnectionThreadSafe(result);
+        inc(fConnectionPoolCount);
+        fConnectionPoolSafe.UnLock;
       end;
     tmMainConnection:
-      result := inherited GetMainConnection; // has its own TOSLightLock
+      result := inherited GetMainConnection; // has its own TLightLock
   else
     result := nil;
   end;
@@ -8031,7 +8101,7 @@ begin
         ftCurrency:
           Value := PCurrency(@VInt64)^;
         ftDate:
-          Value := PDateTime(@VInt64)^;
+          Value := unaligned(PDateTime(@VInt64)^);
         ftUtf8:
           RawUtf8ToVariant(RawUtf8(VData), Value);
         ftBlob:
@@ -8117,7 +8187,7 @@ begin
       begin
         // not only replace 'T'->timeseparator, but force expanded format
         dt := Iso8601ToDateTime(p^.VArray[i]);
-        DateTimeToIso8601Var(dt, {expanded=}true, {ms=}fForceDateWithMS,
+        DateTimeToIso8601Var(dt, {expanded=}true, dsfForceDateWithMS in fFlags,
           Connection.Properties.DateTimeFirstChar, '''', p^.VArray[i]);
       end;
   fParamsArrayCount := ValuesCount;
@@ -8131,7 +8201,8 @@ begin
   // default implementation is to convert JSON values into SQL values
   p := CheckParam(Param, ParamType, paramIn, 0);
   if not JsonArrayToBoundArray(pointer(JsonArray), ParamType,
-     Connection.Properties.DateTimeFirstChar, fForceDateWithMS, p^.VArray) or
+     Connection.Properties.DateTimeFirstChar, dsfForceDateWithMS in fFlags,
+     p^.VArray) or
     (length(p^.VArray) <> ValuesCount) then
     BindArray(Param, ParamType, nil, 0); // raise exception
   p^.VInt64 := ValuesCount;

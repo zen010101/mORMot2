@@ -1201,11 +1201,11 @@ begin
     _sub256(Point.y, Curve_P_32, Point.y);
 end;
 
-const
-  MAX_TRIES = 16; // work almost always on the first trial with TAesPrng
-
 var
-  EccMakeEntropy: THash128Rec; // ensure forward secrecy
+  EccMakeEntropy: THash128Rec; // ensure forward secrecy - from BaseEntropy.r[3]
+
+const
+  MAX_TRIES = 16; // work almost always on the first try with Random128/TAesPrng
 
 function ecc_make_key_pas(out PublicKey: TEccPublicKey;
   out PrivateKey: TEccPrivateKey): boolean;
@@ -1222,15 +1222,13 @@ begin
     if tries = 0 then
       exit;
     // generate a 256-bit secret key with HMAC-SHA-256 over random sources
-    // - keys may be ephemeral so entropy sources were chosen to be fast
+    // - keys may be ephemeral so use our fast but safe CSPRNG as KDF source
     kdf.Init(@EccMakeEntropy, SizeOf(EccMakeEntropy));
-    kdf.Update(@tries, SizeOf(tries));
-    TAesPrng.Main.Fill(priv.b); // 256-bit from our AES-PRNG (max key size)
-    XorMemory(EccMakeEntropy, priv.l);
+    kdf.Update(@tries, SizeOf(tries)); // avoid infinite loop
+    TAesPrng.Main.FillRandom(priv.b);  // 256-bit from our strong CSPRNG
     kdf.Update(@priv, SizeOf(priv));
-    _Fill256FromOs(priv);       // 256-bit padding from fast OS entropy sources
-    kdf.Update(@priv, SizeOf(priv));
-    kdf.Done(priv.b);           // apply the HMAC key derivation function
+    crcblock(@EccMakeEntropy, @priv);  // simple forward secrecy
+    kdf.Done(priv.b);                  // apply the HMAC-SHA-256 safe KDF
     if _isZero(priv) or
        _equals(priv, _1) or
        _equals(priv, _11) then
@@ -1330,6 +1328,23 @@ begin
   _bswap256(@p.h, @u.h);
 end;
 
+function _RandomPoint(var rnd: THash256Rec): boolean;
+var
+  tries: integer;
+begin
+  result := false;
+  tries := MAX_TRIES;
+  repeat
+    dec(tries);
+    if tries = 0 then
+      exit;
+    Random128(@rnd.l, @rnd.h); // fast unpredictable 256-bit
+  until not (_isZero(rnd) or
+             _equals(rnd, _1) or
+             _equals(rnd, _11));
+  result := true;
+end;
+
 function ecdh_shared_secret_uncompressed_pas(
   const PublicPoint: TEccPublicKeyUncompressed;
   const PrivateKey: TEccPrivateKey; out Secret: TEccSecretKey): boolean;
@@ -1337,18 +1352,10 @@ var
   priv: THash256Rec;
   product: TEccPoint;
   rnd: THash256Rec; // random lambda element in projective form to protect priv
-  n: integer;
 begin
-  result := false;
-  n := 10;
-  repeat
-    TAesPrng.Main.Fill(rnd.b); // TLecuyer is too predictable here
-    dec(n);
-    if n = 0 then
-      exit; // never try forever if our PRNG is compromised
-  until not (_isZero(rnd) or
-             _equals(rnd, _1) or
-             _equals(rnd, _11));
+  result := _RandomPoint(rnd);
+  if not result then
+    exit;
   _bswap256(@priv, @PrivateKey);
   EccPointMult(product, TEccPoint(PublicPoint), priv, @rnd);
   _bswap256(@Secret, @product.x);
@@ -1437,16 +1444,12 @@ var
   tries: integer;
 begin
   result := false;
-  tries := 0;
+  tries := MAX_TRIES;
   repeat
-    inc(tries);
-    TAesPrng.Main.Fill(k.b); // TLecuyer is too predictable here
-    if tries >= MAX_TRIES then
-      exit; // the random generator seems broken
-    if _isZero(k) or
-       _equals(k, _1) or
-       _equals(k, _11) then
-      continue;
+    dec(tries);
+    if (tries = 0) or
+       not _RandomPoint(k) then // fast unpredictable 256-bit
+      exit;
     if _cmp256(Curve_N_32, k) <= 0 then
       _dec256(k, Curve_N_32);
     // temp = k * G
@@ -2105,8 +2108,8 @@ initialization
   @Ecc256r1Verify       := @ecdsa_verify_pas;
   @Ecc256r1Uncompress   := @ecc_uncompress_key_pas;
   @Ecc256r1VerifyUncomp := @ecdsa_verify_uncompressed_pas;
-  // setup ecc_make_key_pas() entropy source
-  EccMakeEntropy := SystemEntropy.Startup;
+  // setup ecc_make_key_pas() 128-bit entropy source with some initial value
+  EccMakeEntropy := BaseEntropy.r[3];
 
 end.
 

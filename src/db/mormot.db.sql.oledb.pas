@@ -77,6 +77,9 @@ const
 type
   TSqlDBOleDBConnection = class;
 
+  /// meta-class of all OleDB connection properties classes
+  TSqlDBOleDBConnectionPropertiesClass = class of TSqlDBOleDBConnectionProperties;
+
   TSqlDBOleDBOnCustomError = function(Connection: TSqlDBOleDBConnection;
     ErrorRecords: IErrorRecords; RecordNum: cardinal): boolean of object;
 
@@ -262,7 +265,6 @@ type
     fCommand: ICommandText;
     fRowSet: IRowSet;
     fRowSetAccessor: HACCESSOR;
-    fRowSize: integer;
     fRowStepResult: HRESULT;
     fRowStepHandleRetrieved: PtrUInt;
     fRowStepHandleCurrent: PtrUInt;
@@ -270,11 +272,12 @@ type
     fRowSetData: TBytes;
     fParamBindings: TDBBindingDynArray;
     fColumnBindings: TDBBindingDynArray;
-    fHasColumnValueByRef: boolean;
     fOleDBConnection: TSqlDBOleDBConnection;
     fDBParams: TDBParams;
+    fRowSize: integer;
     fRowBufferSize: integer;
     fUpdateCount: integer;
+    fHasColumnValueByRef: boolean;
     fAlignBuffer: boolean;
     procedure SetRowBufferSize(Value: integer);
     /// resize fParams[] if necessary, set the VType and return pointer to
@@ -539,7 +542,6 @@ type
     // - will handle Microsoft SQL Server error messages (if any)
     function MSOnCustomError(Connection: TSqlDBOleDBConnection;
       ErrorRecords: IErrorRecords; RecordNum: cardinal): boolean;
-  public
   end;
 
   /// OleDB connection properties to Microsoft SQL Server 2005, via
@@ -1087,7 +1089,7 @@ begin
             FastSynUnicode(SynUnicode(VAny), P, V^.Length shr 1);
         end;
       ftBlob: // as varString
-        if fForceBlobAsNull then
+        if dsfForceBlobAsNull in fFlags then
           VType := varNull
         else
         begin
@@ -1122,7 +1124,7 @@ Write:case c^.ColumnType of
         ftDate:
           begin
             W.Add('"');
-            W.AddDateTime(@V^.Double, 'T', #0, fForceDateWithMS);
+            W.AddDateTime(@V^.Double, 'T', #0, dsfForceDateWithMS in fFlags);
             W.AddDirect('"');
           end;
         ftUtf8:
@@ -1133,7 +1135,7 @@ Write:case c^.ColumnType of
             W.AddDirect('"');
           end;
         ftBlob:
-          if fForceBlobAsNull then
+          if dsfForceBlobAsNull in fFlags then
             W.AddNull
           else
             W.WrBase64(ColPtr(C, V), V^.Length, true); // withMagic=true
@@ -1177,7 +1179,7 @@ begin
       ftCurrency:
         Value := PCurrency(@VInt64)^;
       ftDate:
-        Value := PDateTime(@VInt64)^;
+        Value := unaligned(PDateTime(@VInt64)^);
       ftUtf8:
         Value := VText; // returned as WideString/OleStr variant
       ftBlob:

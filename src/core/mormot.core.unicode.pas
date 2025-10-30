@@ -195,8 +195,7 @@ function RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a UTF-16 PWideChar buffer into a UTF-8 buffer
-// - replace system.UnicodeToUtf8 implementation, which is rather slow
-// since Delphi 2009+
+// - replace system.UnicodeToUtf8 implementation, which is slow since Delphi 2009+
 // - append a #0 terminator to the ending PUtf8Char, unless ccfNoTrailingZero is set
 // - if ccfReplacementCharacterForUnmatchedSurrogate is set, this function will identify
 // unmatched surrogate pairs and replace them with UNICODE_REPLACEMENT_CHARACTER -
@@ -608,7 +607,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// convert any Ansi Text into an UTF-8 encoded String
     // - internally calls AnsiBufferToUtf8 virtual method
-    function AnsiToUtf8(const AnsiText: RawByteString): RawUtf8; virtual;
+    procedure AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8); virtual;
     /// direct conversion of a PAnsiChar buffer into a UTF-8 encoded string
     // - will call AnsiBufferToUnicode() overloaded virtual method
     procedure AnsiBufferToRawUtf8(Source: PAnsiChar;
@@ -798,7 +797,7 @@ type
     function Utf8ToAnsi(const u: RawUtf8): RawByteString; override;
     /// convert any Ansi Text into an UTF-8 encoded String
     // - directly assign the input as result, since no conversion is needed
-    function AnsiToUtf8(const AnsiText: RawByteString): RawUtf8; override;
+    procedure AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8); override;
     /// direct conversion of a PAnsiChar buffer into a UTF-8 encoded string
     procedure AnsiBufferToRawUtf8(Source: PAnsiChar;
       SourceChars: cardinal; out Value: RawUtf8); override;
@@ -1255,11 +1254,9 @@ function ToUtf8(const Text: string): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any RTL string into an UTF-8 encoded TSynTempBuffer
-// - returns the number of UTF-8 bytes available in Temp.buf
-// - this overloaded function use a TSynTempBuffer for the result to avoid any
-// memory allocation for the shorter content
+// - returns in Temp.len the number of UTF-8 bytes stored into result
 // - caller should call Temp.Done to release any heap-allocated memory
-function StringToUtf8(const Text: string; var Temp: TSynTempBuffer): integer; overload;
+function StringToUtf8Temp(const Text: string; var Temp: TSynTempBuffer): PUtf8Char;
 
 /// convert any Ansi memory buffer into UTF-8, using a TSynTempBuffer if needed
 // - caller should release any memory by calling Temp.Done
@@ -1510,6 +1507,12 @@ function IdemPropName(const P1, P2: ShortString): boolean; overload;
   // - use it with property names values (i.e. only including A..Z,0..9,_ chars)
   // - behavior is undefined with UTF-8 encoding (some false positive may occur)
 function IdemPropName(const P1: ShortString; P2: PUtf8Char; P2Len: PtrInt): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// case insensitive comparison of ASCII 7-bit identifiers with P1/P2 <> ''
+// - use it with property names values (i.e. only including A..Z,0..9,_ chars)
+// - behavior is undefined with UTF-8 encoding (some false positive may occur)
+function IdemPropNameNotNull(const P1: ShortString; P2: PUtf8Char; P2Len: PtrInt): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// case insensitive comparison of ASCII 7-bit identifiers
@@ -2262,6 +2265,10 @@ function GotoEndOfQuotedString(P: PUtf8Char): PUtf8Char;
 function GotoNextNotSpace(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// get the next character not in [#1..' ']
+function IgnoreAndGotoNextNotSpace(P: PUtf8Char): PUtf8Char;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// get the next character not in [#9,' ']
 function GotoNextNotSpaceSameLine(P: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
@@ -2363,7 +2370,7 @@ procedure TrimLeftLowerCaseToShort(V: PShortString; out result: ShortString); ov
 
 /// fast append some UTF-8 text into a ShortString, with an ending ','
 procedure AppendShortComma(text: PAnsiChar; len: PtrInt; var result: ShortString;
-  trimlowercase: boolean);   {$ifdef FPC} inline; {$endif}
+  trimlowercase: boolean);
 
 /// fast search of an exact case-insensitive match of a RTTI's PShortString array
 function FindShortStringListExact(List: PShortString; MaxValue: integer;
@@ -2674,9 +2681,8 @@ type
   // case-insensitive search, as it would on a Windows file system
   // - will use our fast PosixFileNames() low-level API to read the names
   // and store them into its in-memory cache (until Flush or after FlushSeconds)
-  TPosixFileCaseInsensitive = class
+  TPosixFileCaseInsensitive = class(TObjectRWLightLock)
   protected
-    fSafe: TRWLightLock;
     fFiles: TRawUtf8DynArray;
     fFolder: TFileName;
     fNextTix, fFlushSeconds: cardinal;
@@ -3953,9 +3959,9 @@ begin
   AnsiToUnicodeStringVar(pointer(Source), length(Source), result);
 end;
 
-function TSynAnsiConvert.AnsiToUtf8(const AnsiText: RawByteString): RawUtf8;
+procedure TSynAnsiConvert.AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8);
 begin
-  AnsiBufferToRawUtf8(pointer(AnsiText), length(AnsiText), result);
+  AnsiBufferToRawUtf8(pointer(AnsiText), length(AnsiText), Value);
 end;
 
 procedure TSynAnsiConvert.AnsiBufferToRawUtf8(Source: PAnsiChar;
@@ -4821,10 +4827,10 @@ begin
   EnsureRawUtf8(result);
 end;
 
-function TSynAnsiUtf8.AnsiToUtf8(const AnsiText: RawByteString): RawUtf8;
+procedure TSynAnsiUtf8.AnsiToUtf8(const AnsiText: RawByteString; var Value: RawUtf8);
 begin
-  result := AnsiText; // may be read-only: no FastAssignUtf8/FakeCodePage
-  EnsureRawUtf8(result);
+  Value := AnsiText; // may be read-only: no FastAssignUtf8/FakeCodePage
+  EnsureRawUtf8(Value);
 end;
 
 procedure TSynAnsiUtf8.AnsiBufferToRawUtf8(
@@ -5350,7 +5356,7 @@ begin
   if Ansi = '' then
     result := ''
   else
-    result := TSynAnsiConvert.Engine(CodePage).AnsiToUtf8(Ansi);
+    TSynAnsiConvert.Engine(CodePage).AnsiToUtf8(Ansi, result);
 end;
 
 function AnsiToString(const Ansi: RawByteString; CodePage: integer): string;
@@ -5452,13 +5458,13 @@ begin
   RawUnicodeToUtf8(pointer(Text), Length(Text), result);
 end;
 
-function StringToUtf8(const Text: string; var Temp: TSynTempBuffer): integer;
+function StringToUtf8Temp(const Text: string; var Temp: TSynTempBuffer): PUtf8Char;
 var
-  len: integer;
+  len: PtrInt;
 begin
   len := length(Text);
-  Temp.Init(len * 3);
-  result := RawUnicodeToUtf8(Temp.buf, Temp.len + 1, pointer(Text), len, []);
+  result := Temp.Init(len * 3);
+  Temp.Len := RawUnicodeToUtf8(result, Temp.len + 1, pointer(Text), len, []);
 end;
 
 function ToUtf8(const Text: string): RawUtf8;
@@ -5578,7 +5584,7 @@ end;
 
 function StringToUtf8(const Text: string): RawUtf8;
 begin
-  result := CurrentAnsiConvert.AnsiToUtf8(Text);
+  CurrentAnsiConvert.AnsiToUtf8(Text, result);
 end;
 
 procedure StringToUtf8(Text: PChar; TextLen: PtrInt; var result: RawUtf8);
@@ -5588,25 +5594,28 @@ end;
 
 procedure StringToUtf8(const Text: string; var result: RawUtf8);
 begin
-  result := CurrentAnsiConvert.AnsiToUtf8(Text);
+  CurrentAnsiConvert.AnsiToUtf8(Text, result);
 end;
 
-function StringToUtf8(const Text: string; var Temp: TSynTempBuffer): integer;
-var
-  len: PtrInt;
+function StringToUtf8Temp(const Text: string; var Temp: TSynTempBuffer): PUtf8Char;
 begin
-  len := length(Text);
-  Temp.Init(len * 3);
-  if len <> 0 then
-    result := CurrentAnsiConvert.
-      AnsiBufferToUtf8(Temp.buf, pointer(Text), len) - PUtf8Char(Temp.buf)
-  else
-    result := 0;
+  Temp.buf := nil;
+  Temp.Len := 0;
+  result := pointer(Text);
+  if result = nil then
+    exit;
+  Temp.Len := PStrLen(result - _STRLEN)^;
+  {$ifdef HASCODEPAGE} if PStrRec(result - _STRRECSIZE)^.CodePage = CP_UTF8 then
+  {$else} if IsAnsiCompatible(PAnsiChar(result), Temp.Len) then {$endif HASCODEPAGE}
+    exit; // no conversion needed
+  result := Temp.Init(Temp.Len * 3);
+  Temp.Len := CurrentAnsiConvert.AnsiBufferToUtf8(result, pointer(Text),
+                PStrLen(PAnsiChar(pointer(Text)) - _STRLEN)^) - result;
 end;
 
 function ToUtf8(const Text: string): RawUtf8;
 begin
-  result := CurrentAnsiConvert.AnsiToUtf8(Text);
+  CurrentAnsiConvert.AnsiToUtf8(Text, result);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -6039,6 +6048,12 @@ begin
   result := (ord(P1[0]) = P2Len) and
             ((P2Len = 0) or
              IdemPropNameUSameLenNotNull(@P1[1], P2, P2Len));
+end;
+
+function IdemPropNameNotNull(const P1: ShortString; P2: PUtf8Char; P2Len: PtrInt): boolean;
+begin
+  result := (ord(P1[0]) = P2Len) and
+            IdemPropNameUSameLenNotNull(@P1[1], P2, P2Len);
 end;
 
 function IdemPropName(P1, P2: PUtf8Char; P1Len, P2Len: PtrInt): boolean;
@@ -8809,9 +8824,17 @@ begin
   {$else}
   if P^ in [#1..' '] then
     repeat
-      inc(P)
+      inc(P);
     until not (P^ in [#1..' ']);
   {$endif FPC}
+  result := P;
+end;
+
+function IgnoreAndGotoNextNotSpace(P: PUtf8Char): PUtf8Char;
+begin
+  repeat
+    inc(P);
+  until not (P^ in [#1..' ']);
   result := P;
 end;
 
@@ -9215,20 +9238,22 @@ end;
 
 procedure AppendShortComma(text: PAnsiChar; len: PtrInt; var result: ShortString;
   trimlowercase: boolean);
+var
+  textlen: PtrInt;
 begin
   if trimlowercase then
     while text^ in ['a'..'z'] do
-      if len = 1 then
-        exit
-      else
-      begin
-        inc(text);
-        dec(len);
-      end;
-  if integer(ord(result[0])) + len >= 255 then
+    begin
+      inc(text);
+      dec(len);
+      if len = 0 then
+        exit;
+    end;
+  textlen := ord(result[0]);
+  if textlen + len >= 255 then
     exit;
   if len > 0 then
-    MoveByOne(text, @result[ord(result[0]) + 1], len);
+    MoveByOne(text, @result[textlen + 1], len);
   inc(result[0], len + 1);
   result[ord(result[0])] := ',';
 end;
@@ -10430,6 +10455,8 @@ type
   {$endif CPUX86NOTPIC}
 
 var
+  /// this is the main Unicode 10.0 case folding lookup table
+  // - undecompressed from 1KB constant at unit initialization
   {$ifdef UU_COMPRESSED}
   UU: TUnicodeUpperTable;
   {$else}
@@ -10834,8 +10861,8 @@ by1:    c := byte(S^);
         end
         else
         begin
-          extra := utf8.Lookup[c];
-          if (extra = UTF8_INVALID) or // allow full UTF-8/UCS-4 range
+          extra := utf8.Lookup[c]; // allow full UTF-8/UCS-4 range
+          if (extra = UTF8_INVALID) or
              (S + extra > PUtf8Char(SLen)) then
             break;
           i := 0;
@@ -11279,8 +11306,8 @@ end;
 
 const
   // reference 8-bit upper chars as in WinAnsi/CP1252 for NormToUpper/Lower[]
-  // - UU[] would convert accents into upper accents: this one to upper plain
-  // (e.g. e acute to E)
+  // - UU[] would convert accents into upper accents (e acute to E acute): this
+  // table converts to the upper plain/unaccentuated char (e.g. e acute to E)
   {%H-}WinAnsiToUp: array[138..255] of byte = (
     83,  139, 140, 141, 90,  143, 144, 145, 146, 147, 148, 149, 150, 151, 152,
     153, 83,  155, 140, 157,  90,  89, 160, 161, 162, 163, 164, 165, 166, 167,
@@ -11373,52 +11400,59 @@ procedure InitializeUnit;
 var
   i: PtrInt;
   c: AnsiChar;
+  tc: TTextChar;
   ck: TCharKind;
   sc: TSnakeCase;
   lng: TLanguage;
+  p: PByteArray;
 begin
   // decompress 1KB static in the exe into 20KB UU[] array for Unicode Uppercase
   {$ifdef UU_COMPRESSED}
   InitializeUU;
   {$endif UU_COMPRESSED}
   // initialize internal lookup tables for various text conversions
+  p := @NormToNormByte;
   for i := 0 to 255 do
-    NormToNormByte[i] := i;
+    p[i] := i;
   NormToUpperAnsi7Byte := NormToNormByte;
+  p := @NormToUpperAnsi7Byte;
   for i := ord('a') to ord('z') do
-    dec(NormToUpperAnsi7Byte[i], 32);
+    dec(p[i], 32);
   NormToLowerAnsi7Byte := NormToNormByte;
+  p := @NormToLowerAnsi7Byte;
   for i := ord('A') to ord('Z') do
-    inc(NormToLowerAnsi7Byte[i], 32);
+    inc(p[i], 32);
   MoveFast(NormToUpperAnsi7, NormToUpper, 138);
   MoveFast(WinAnsiToUp, NormToUpperByte[138], SizeOf(WinAnsiToUp));
-  for i := 0 to 255 do
-  begin
-    c := NormToUpper[AnsiChar(i)];
-    if c in ['A'..'Z'] then
-      inc(c, 32); // manual lower
-    NormToLower[AnsiChar(i)] := c;
-  end;
+  MoveFast(NormToLowerAnsi7, NormToLower, 138);
+  MoveFast(WinAnsiToUp, NormToLowerByte[138], SizeOf(WinAnsiToUp));
+  p := @NormToLowerByte;
+  for i := 138 to 255 do
+    if p[i] in [ord('A') .. ord('Z')] then
+      inc(p[i], 32); // manual lower
   for c := low(c) to high(c) do
   begin
+    tc := [];
     if not (c in [#0, #10, #13]) then
-      include(TEXT_CHARS[c], tcNot01013);
+      include(tc, tcNot01013);
     if c in [#10, #13] then
-      include(TEXT_CHARS[c], tc1013);
+      include(tc, tc1013);
     if c in ['0'..'9', 'a'..'z', 'A'..'Z'] then
-      include(TEXT_CHARS[c], tcWord);
+      include(tc, tcWord);
     if c in ['_', 'a'..'z', 'A'..'Z'] then
-      include(TEXT_CHARS[c], tcIdentifierFirstChar);
+      include(tc, tcIdentifierFirstChar);
     if c in ['_', '0'..'9', 'a'..'z', 'A'..'Z'] then
-      include(TEXT_CHARS[c], tcIdentifier);
+      include(tc, tcIdentifier);
     if c in ['_', '-', '.', '0'..'9', 'a'..'z', 'A'..'Z'] then
       // '~' is part of the RFC 3986 but should be escaped in practice
       // see https://blog.synopse.info/?post/2020/08/11/The-RFC%2C-The-URI%2C-and-The-Tilde
-      include(TEXT_CHARS[c], tcUriUnreserved);
+      include(tc, tcUriUnreserved);
     if c in [#1..#9, #11, #12, #14..' '] then
-      include(TEXT_CHARS[c], tcCtrlNotLF);
+      include(tc, tcCtrlNotLF);
     if c in [#1..' ', ';'] then
-      include(TEXT_CHARS[c], tcCtrlNot0Comma);
+      include(tc, tcCtrlNot0Comma);
+    TEXT_CHARS[c] := tc;
+    ck := ckOther;
     case c of
       'a'..'z':
         ck := ckLowerAlpha;
@@ -11430,10 +11464,9 @@ begin
         ck := ckUnderscore;
       '.', ',', ';':
         ck := ckPoint;
-    else
-      ck := ckOther;
     end;
     IDENT_CHARS[c] := ck;
+    sc := [];
     case c of
       '0' .. '9':
         sc := [scDigit];
@@ -11443,8 +11476,6 @@ begin
         sc := [scLow];
       '_':
         sc := [sc_];
-    else
-      sc := [];
     end;
     SNAKE_CHARS[c] := sc;
   end;

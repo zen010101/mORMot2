@@ -471,6 +471,8 @@ type
 
   /// options set for TTextWriter.WriteObject() method
   TTextWriterWriteObjectOptions = set of TTextWriterWriteObjectOption;
+  /// two sets of TTextWriter.WriteObject() options
+  TTextWriterWriteObjectOptionsBoolean = array[boolean] of TTextWriterWriteObjectOptions;
 
   /// the potential places were TJsonWriter.AddHtmlEscape should process
   // proper HTML string escaping, unless hfNone is used
@@ -877,6 +879,7 @@ type
     /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeUtf8(const Text: RawUtf8;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere);
+      {$ifdef HASINLINE}inline;{$endif}
     /// low-level function removing all &lt; &gt; &amp; &quot; HTML entities
     procedure AddHtmlUnescape(p, amp: PUtf8Char; plen: PtrUInt);
     /// low-level function removing all HTML <tag> and &entities;
@@ -1242,7 +1245,7 @@ const
     [twoEnumSetsAsTextInRecord]);
 
   /// TTextWriter JSON serialization options including woEnumSetsAsText
-  TEXTWRITEROBJECTOPTIONS_ENUMASTEXT: array[boolean] of TTextWriterWriteObjectOptions = (
+  TEXTWRITEROBJECTOPTIONS_ENUMASTEXT: TTextWriterWriteObjectOptionsBoolean = (
     [],
     [woEnumSetsAsText]);
 
@@ -1885,7 +1888,7 @@ function FormatToShort(const Format: RawUtf8; const Args: array of const): Short
 /// fast Format() function replacement, tuned for small content
 // - use the same single token % (and implementation) than FormatUtf8()
 procedure FormatString(const Format: RawUtf8; const Args: array of const;
-  out result: string); overload;
+  var result: string); overload;
 
 /// fast Format() function replacement, tuned for small content
 // - use the same single token % (and implementation) than FormatUtf8()
@@ -1893,9 +1896,14 @@ function FormatString(const Format: RawUtf8; const Args: array of const): string
   {$ifdef FPC}inline;{$endif} // Delphi don't inline "array of const" parameters
 
 /// fast Format() function replacement, for UTF-8 content stored in TShort16
-// - truncate result if the text size exceeds 16 bytes
+// - truncate result if the text size exceeds 16 chars (17 bytes)
 procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
   var result: TShort16);
+
+/// fast Format() function replacement, for UTF-8 content stored in TShort31
+// - truncate result if the text size exceeds 31 chars (32 bytes)
+procedure FormatShort31(const Format: RawUtf8; const Args: array of const;
+  var result: TShort31);
 
 /// fast Format() function replacement, for UTF-8 content stored in variant
 function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
@@ -2036,20 +2044,20 @@ procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean = tru
 /// create a temporary string random content, WinAnsi (code page 1252) content
 function RandomWinAnsi(CharCount: integer): WinAnsiString;
 
-/// create a temporary UTF-8 string random content, using WinAnsi
-// (code page 1252) content
+/// create a temporary UTF-8 random string, from RandomWinAnsi() content
 // - CharCount is the number of random WinAnsi chars, so it is very likely that
 // length(result) > CharCount once encoded into UTF-8
 function RandomUtf8(CharCount: integer): RawUtf8;
 
-/// create a temporary UTF-16 string random content, using WinAnsi
-// (code page 1252) content
+/// create a temporary UTF-16 random string, from RandomWinAnsi() content
 function RandomUnicode(CharCount: integer): SynUnicode;
 
-/// create a temporary string random content, using ASCII 7-bit content
+/// create a temporary string random content, using only ASCII 7-bit chars
+// - e.g. RandomAnsi7(10) = '1d2I(\?U; ' (from #$20 space to #$7e tilde)
 function RandomAnsi7(CharCount: integer; CodePage: integer = CP_UTF8): RawByteString;
 
 /// create a temporary string random content, using A..Z,_,0..9 chars only
+// - for a strong password, use safer TAesPrng.Main.RandomPassword method
 function RandomIdentifier(CharCount: integer): RawUtf8;
 
 /// create a temporary string random content, using uri-compatible chars only
@@ -2187,12 +2195,15 @@ type
     // - will handle vtPointer/vtClass/vtObject/vtVariant kind of arguments,
     // appending class name for any class or object, the hexa value for a
     // pointer, or the JSON representation of any supplied TDocVariant
+    // - the exception will be raised at the caller address (as expected)
     class procedure RaiseLastOSError(const Format: RawUtf8;
       const Args: array of const; const Trailer: ShortString = 'OSError');
     /// a wrapper function around raise CreateUtf8()
     // - generated executable code could be slightly shorter
+    // - the exception will be raised at the caller address (as expected)
     class procedure RaiseUtf8(const Format: RawUtf8; const Args: array of const);
     /// a wrapper function around raise CreateU()
+    // - the exception will be raised at the caller address (as expected)
     class procedure RaiseU(const Msg: RawUtf8);
     {$ifndef NOEXCEPTIONINTERCEPT}
     /// can be used to customize how the exception is logged
@@ -2735,13 +2746,13 @@ function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 // $ { "Uid": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
 function TextToGuid(P: PUtf8Char; Guid: PByteArray): PUtf8Char;
 
-/// convert some RTL string text into a TGuid
+/// convert some GUID or UUID RTL string text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
 // is not a valid TGuid
 function StringToGuid(const text: string): TGuid;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
@@ -2749,13 +2760,13 @@ function StringToGuid(const text: string): TGuid;
 // is not a valid TGuid
 function RawUtf8ToGuid(const text: RawByteString): TGuid; overload;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean; overload;
 
-/// convert some UTF-8 encoded text into a TGuid
+/// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
@@ -4279,7 +4290,9 @@ end;
 class procedure TTextWriter.RaiseUnimplemented(const Method: ShortString);
 begin
   raise ESynException.CreateUtf8(
-    '%.% unimplemented: use TJsonWriter', [self, Method]);
+    '%.% unimplemented: use TJsonWriter', [self, Method])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif}
 end;
 
 procedure TTextWriter.Add(const Format: RawUtf8; const Values: array of const;
@@ -6028,7 +6041,7 @@ begin
       beg := Text;
       repeat
         while true do
-          if esc[Text^] = 0 then
+          if esc[Text^] = 0 then // this loop is faster than TextLen overload
             inc(Text)
           else
             break;
@@ -6042,7 +6055,7 @@ begin
       until Text^ = #0;
     end
     else
-      AddNoJsonEscape(Text, mormot.core.base.StrLen(Text)); // hfNone
+      AddNoJsonEscape(Text); // hfNone
 end;
 
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; TextLen: PtrInt;
@@ -6051,29 +6064,27 @@ var
   beg: PUtf8Char;
   esc: PAnsiCharToByte;
 begin
-  if (Text = nil) or
-     (TextLen <= 0) then
-    exit;
-  if Fmt = hfNone then
-  begin
-    AddNoJsonEscape(Text, TextLen);
-    exit;
-  end;
-  inc(TextLen, PtrInt(Text)); // TextLen = final PtrInt(Text)
-  esc := @HTML_ESC[Fmt];
-  repeat
-    beg := Text;
-    while (PtrUInt(Text) < PtrUInt(TextLen)) and
-          (esc[Text^] = 0) do
-      inc(Text);
-    AddNoJsonEscape(beg, Text - beg);
-    if (PtrUInt(Text) = PtrUInt(TextLen)) or
-       (Text^ = #0) then
-      exit
+  if (Text <> nil) and
+     (TextLen > 0) then
+    if Fmt <> hfNone then
+    begin
+      inc(TextLen, PtrInt(Text)); // TextLen = final PtrInt(Text)
+      esc := @HTML_ESC[Fmt];
+      repeat
+        beg := Text;
+        while (PtrUInt(Text) < PtrUInt(TextLen)) and
+              (esc[Text^] = 0) do
+          inc(Text);
+        AddNoJsonEscape(beg, Text - beg);
+        if (PtrUInt(Text) = PtrUInt(TextLen)) or
+           (Text^ = #0) then
+          break;
+        AddShorter(HTML_ESCAPED[esc[Text^]]);
+        inc(Text);
+      until false;
+    end
     else
-      AddShorter(HTML_ESCAPED[esc[Text^]]);
-    inc(Text);
-  until false;
+      AddNoJsonEscape(Text, TextLen); // hfNone
 end;
 
 procedure TTextWriter.AddHtmlEscapeW(Text: PWideChar; Fmt: TTextWriterHtmlFormat);
@@ -6081,29 +6092,34 @@ var
   tmp: TSynTempBuffer;
 begin
   if Text <> nil then
-    if Fmt = hfNone then
-      AddNoJsonEscapeW(pointer(Text))
-    else
+    if Fmt <> hfNone then
     begin
-      RawUnicodeToUtf8(Text, StrLenW(Text), tmp, [ccfNoTrailingZero]);
-      AddHtmlEscape(tmp.buf, tmp.Len, Fmt);
+      RawUnicodeToUtf8(Text, mormot.core.base.StrLenW(Text), tmp, []);
+      AddHtmlEscape(tmp.buf, Fmt); // faster with no TextLen
       tmp.Done;
-    end;
+    end
+    else
+      AddNoJsonEscapeW(pointer(Text)); // seldom called
 end;
 
 procedure TTextWriter.AddHtmlEscapeString(const Text: string; Fmt: TTextWriterHtmlFormat);
 var
   tmp: TSynTempBuffer;
-  len: integer;
 begin
-  len := StringToUtf8(Text, tmp);
-  AddHtmlEscape(tmp.buf, len, Fmt);
+  AddHtmlEscape(StringToUtf8Temp(Text, tmp), tmp.len, Fmt);
   tmp.Done;
 end;
 
 procedure TTextWriter.AddHtmlEscapeUtf8(const Text: RawUtf8; Fmt: TTextWriterHtmlFormat);
+var
+  p: PUtf8Char;
 begin
-  AddHtmlEscape(pointer(Text), length(Text), Fmt);
+  p := pointer(Text);
+  if p <> nil then
+    if Fmt <> hfNone then
+      AddHtmlEscape(p, Fmt) // faster with no TextLen
+    else
+      AddNoJsonEscapeBig(p, PStrLen(p - _STRLEN)^) // seldom called
 end;
 
 procedure TTextWriter.AddHtmlUnescape(p, amp: PUtf8Char; plen: PtrUInt);
@@ -6394,7 +6410,7 @@ begin
   if (len < 2) or (len > 6) then
     exit;
   by4 := 0;
-  MoveByOne(entity, @by4, MinPtrUInt(len, 4));
+  MoveByOne(entity, @by4, MinPtrUInt(4, len));
   result := IntegerScanIndex(@HTML_UNESCAPE, length(HTML_UNESCAPE), by4) + 1;
   if result >= 37 then // adjust 'frac' as frac14', 'frac12' or 'frac34'
     if result > 37 then
@@ -6423,7 +6439,7 @@ var
   amp: PUtf8CHar;
   temp: TTextWriterStackBuffer;
 begin
-  amp := PosChar(pointer(text), length(text), '&');
+  amp := PosCharU(text, '&');
   if amp = nil then
   begin
     result := text; // nothing to change
@@ -6444,7 +6460,7 @@ var
   tag: PUtf8CHar;
   temp: TTextWriterStackBuffer;
 begin
-  tag := PosChar(pointer(text), length(text), '<');
+  tag := PosCharU(text, '<');
   if tag = nil then
   begin
     result := HtmlUnescape(text); // no tag, but there may be some &entity;
@@ -9823,19 +9839,13 @@ begin
     FastAssignNew(Result);
 end;
 
-procedure FormatShort(const Format: RawUtf8; const Args: array of const;
-  var result: ShortString);
+function FormatBufferRaw(const Format: RawUtf8; Args: PVarRec; ArgsCount: PtrInt;
+  Dest: pointer; DestLen: PtrInt): PUtf8Char;
 var
   f: TFormatUtf8;
 begin
-  if (Format = '') or
-     (high(Args) < 0) then // no formatting needed
-    SetString(result, PAnsiChar(pointer(Format)), length(Format))
-  else
-  begin
-    f.Parse(Format, @Args[0], length(Args));
-    result[0] := AnsiChar(f.WriteMax(@result[1], 255) - @result[1]);
-  end;
+  f.Parse(Format, Args, ArgsCount);
+  result := f.WriteMax(Dest, DestLen);
 end;
 
 function FormatBuffer(const Format: RawUtf8; const Args: array of const;
@@ -9849,13 +9859,11 @@ begin
                 Dest, DestLen) - PUtf8Char(Dest);
 end;
 
-function FormatBufferRaw(const Format: RawUtf8; Args: PVarRec; ArgsCount: PtrInt;
-  Dest: pointer; DestLen: PtrInt): PUtf8Char;
-var
-  f: TFormatUtf8;
+procedure FormatShort(const Format: RawUtf8; const Args: array of const;
+  var result: ShortString);
 begin
-  f.Parse(Format, Args, ArgsCount);
-  result := f.WriteMax(Dest, DestLen);
+  result[0] := AnsiChar(FormatBufferRaw(
+    Format, @Args[0], length(Args), @result[1], 255) - @result[1]);
 end;
 
 function FormatToShort(const Format: RawUtf8;
@@ -9867,21 +9875,20 @@ end;
 
 procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
   var result: TShort16);
-var
-  f: TFormatUtf8;
 begin
-  if (Format = '') or
-     (high(Args) < 0) then // no formatting needed
-    SetString(result, PAnsiChar(pointer(Format)), length(Format))
-  else
-  begin
-    f.Parse(Format, @Args[0], length(Args));
-    result[0] := AnsiChar(f.WriteMax(@result[1], 16) - @result[1]);
-  end;
+  result[0] := AnsiChar(FormatBufferRaw(
+    Format, @Args[0], length(Args), @result[1], 16) - @result[1]);
+end;
+
+procedure FormatShort31(const Format: RawUtf8; const Args: array of const;
+  var result: TShort31);
+begin
+  result[0] := AnsiChar(FormatBufferRaw(
+    Format, @Args[0], length(Args), @result[1], 31) - @result[1]);
 end;
 
 procedure FormatString(const Format: RawUtf8; const Args: array of const;
-  out result: string);
+  var result: string);
 var
   f: TFormatUtf8;
 begin
@@ -10086,6 +10093,7 @@ end;
 function Make(const Args: array of const): RawUtf8;
 var
   f: TFormatUtf8;
+  new: PUtf8Char;
 begin
   if high(Args) = 0 then
   begin
@@ -10095,24 +10103,33 @@ begin
   {%H-}f.Init;
   f.AddVarRec(@Args[0], length(Args));
   if f.L <> 0 then
-    f.WriteAll(FastSetString(result, f.L), @f.blocks)
+  begin
+    new := FastNewString(f.L, CP_UTF8); // inlined FastSetString()
+    f.WriteAll(new, @f.blocks);
+  end
   else
-    FastAssignNew(result);
+    new := nil;
+  FastAssignNew(result, new);
 end;
 
 procedure Make(const Args: array of const; var Result: RawUtf8;
   const IncludeLast: RawUtf8);
 var
   f: TFormatUtf8;
+  new: PUtf8Char;
 begin
   {%H-}f.Init;
   f.AddVarRec(@Args[0], length(Args));
   if IncludeLast <> '' then
     f.AddText(IncludeLast);
   if f.L <> 0 then
-    f.WriteAll(FastSetString(result, f.L), @f.blocks)
+  begin
+    new := FastNewString(f.L, CP_UTF8); // inlined FastSetString()
+    f.WriteAll(new, @f.blocks);
+  end
   else
-    FastAssignNew(result);
+    new := nil;
+  FastAssignNew(Result, new);
 end;
 
 function MakeString(const Args: array of const): string;
@@ -10296,7 +10313,7 @@ var
 begin
   R := RandomByteString(CharCount, result, CodePage);
   for i := 0 to CharCount - 1 do
-    R[i] := (R[i] mod 95) + 32; // may include tilde #$7e (#126) char
+    R[i] := (R[i] mod 95) + 32; // [' ' .. #$7e] (#126=tilde) range
 end;
 
 procedure InitRandom64(chars64: PAnsiChar; count: integer; var result: RawUtf8);
@@ -10540,18 +10557,24 @@ begin
   error := GetLastError;
   FormatUtf8('% 0x% [%] %', [Trailer, CardinalToHexShort(error),
     StringReplaceAll(GetErrorText(error), '%', '#'), Format], fmt);
-  raise CreateUtf8(fmt, Args);
+  raise CreateUtf8(fmt, Args)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 class procedure ESynException.RaiseUtf8(const Format: RawUtf8;
   const Args: array of const);
 begin
-  raise CreateUtf8(Format, Args);
+  raise CreateUtf8(Format, Args)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 class procedure ESynException.RaiseU(const Msg: RawUtf8);
 begin
-  raise CreateU(Msg);
+  raise CreateU(Msg)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+  {$else} at ReturnAddress {$endif}
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
@@ -10707,7 +10730,7 @@ const
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
    'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
-   'Invalid Request');                  // 513 should be last INDEX_HTTP_INVALID
+   'Invalid Request');                  // last INDEX_HTTP_INVALID = 513
   HTTP_CODE: array[0 .. INDEX_HTTP_INVALID] of word = ( // match HTTP_REASON[]
     HTTP_SUCCESS,
     HTTP_NOCONTENT,
@@ -12066,16 +12089,17 @@ var
   c: AnsiChar;
   P: PAnsiChar;
   B, B4: PByteArray;
-  m: TUriMethod;
+  pc: PCardinalArray;
   tmp: array[0..15] of AnsiChar;
 begin
   // initialize internal lookup tables for various text conversions
-  HexLookup(@TwoDigitsHex, '0123456789ABCDEF');
+  HexLookup(@TwoDigitsHex,      '0123456789ABCDEF');
   HexLookup(@TwoDigitsHexLower, '0123456789abcdef');
   {$ifdef DOUBLETOSHORT_USEGRISU}
   MoveFast(TwoDigitLookup[0], TwoDigitByteLookupW[0], SizeOf(TwoDigitLookup));
+  B := @TwoDigitByteLookupW;
   for i := 0 to 199 do
-    dec(PByteArray(@TwoDigitByteLookupW)[i], ord('0')); // '0'..'9' -> 0..9
+    dec(B[i], ord('0')); // '0'..'9' -> 0..9
   {$endif DOUBLETOSHORT_USEGRISU}
   FillcharFast(ConvertHexToBin, SizeOf(ConvertHexToBin), 255); // all to 255
   FillcharFast(ConvertHexToShl, SizeOf(ConvertHexToShl), 255);
@@ -12145,8 +12169,12 @@ begin
     if c in [#0, '&', '"'] then
       HTML_ESC[hfWithinAttributes, c] := v;
   end;
-  for m := low(METHODNAME32) to pred(high(METHODNAME32)) do
-    METHODNAME32[m] := PCardinal(METHODNAME[m])^;
+  pc := @METHODNAME32;
+  i := length(METHODNAME32);
+  repeat
+    dec(i);
+    pc[i] := PCardinal(METHODNAME[TUriMethod(i)])^;
+  until i = 0;
   ShortToUuid := _ShortToUuid;
   AppendShortUuid := _AppendShortUuid;
   _VariantToUtf8DateTimeToIso8601 := __VariantToUtf8DateTimeToIso8601;

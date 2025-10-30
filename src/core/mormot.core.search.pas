@@ -139,7 +139,7 @@ function SortFindFileTimestamp(const A, B): integer;
 
 /// compute the HTML index page corresponding to a local folder
 procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
-  out Html: RawUtf8);
+  out Html: RawUtf8; NoSubFolder: boolean = false);
 
 
 type
@@ -318,7 +318,7 @@ type
     function MatchString(const aText: string): integer;
   end;
 
-  /// store a decoded URI as full path and file/resource name
+  /// store a decoded URI as full path and file/resource name for TUriMatch
   {$ifdef USERECORDWITHMETHODS}
   TUriMatchName = record
   {$else}
@@ -326,10 +326,12 @@ type
   {$endif USERECORDWITHMETHODS}
   public
     /// the full URI path
+    // - e.g. 'folder/*.bak' or '*.bak'
     Path: TValuePUtf8Char;
     /// its resource name, as decoded by ParsePath from the Path value
+    // - e.g. '*.bak' for both Path = 'folder/*.bak' and '*.bak'
     Name: TValuePUtf8Char;
-    /// to be called once Path has been populated to compute Name
+    /// to be called once Path has been populated to compute the resource Name
     procedure ParsePath;
   end;
 
@@ -1577,9 +1579,8 @@ type
   // - each time zone will be identified by its TzId string, as defined by
   // Microsoft for its Windows Operating system
   // - note that each instance is thread-safe
-  TSynTimeZone = class
+  TSynTimeZone = class(TObjectRWLightLock)
   protected
-    fSafe: TRWLightLock;
     fZone: TTimeZoneDataDynArray;
     fZoneCount: integer;
     fZones: TDynArrayHashed;
@@ -1596,7 +1597,7 @@ type
   public
     /// initialize the internal storage
     // - but no data is available, until Load* methods are called
-    constructor Create;
+    constructor Create; override;
     /// finalize the instance
     destructor Destroy; override;
     /// will retrieve the default shared TSynTimeZone instance
@@ -2139,7 +2140,7 @@ begin
 end;
 
 procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
-  out Html: RawUtf8);
+  out Html: RawUtf8; NoSubFolder: boolean);
 const
   _DIR: array[boolean] of string[7] = ('[dir]', '&nbsp;');
 var
@@ -2170,31 +2171,35 @@ begin
     for i := 1 to length(files) do
     begin
       isfile := f^.Size >= 0; // size = -1 for folders
-      StringToUtf8(f^.Name, n);
-      w.AddShorter('<tr><td>');
-      w.AddShorter(_DIR[isfile]);
-      w.AddShort('</td><td><a href="');
-      if Path <> '' then
+      if isfile or
+         not NoSubFolder then
       begin
-        w.AddHtmlEscapeUtf8(Path);
-        if Path[length(Path)] <> '/' then
+        StringToUtf8(f^.Name, n);
+        w.AddShorter('<tr><td>');
+        w.AddShorter(_DIR[isfile]);
+        w.AddShort('</td><td><a href="');
+        if Path <> '' then
+        begin
+          w.AddHtmlEscapeUtf8(Path);
+          if Path[length(Path)] <> '/' then
+            w.AddDirect('/');
+        end;
+        UrlEncodeName(w, n);
+        if not isFile then
           w.AddDirect('/');
+        w.AddDirect('"', '>');
+        w.AddHtmlEscapeUtf8(n);
+        if not isFile then
+          w.AddDirect('/');
+        w.AddShort('</a></td><td>');
+        w.AddDateTime(@f^.Timestamp, ' ', #0, false, true);
+        w.AddShort('&nbsp;</td><td align="right">');
+        if isFile then
+          w.AddShort(KB(f^.Size))
+        else
+          w.AddDirect('-');
+        w.AddShort('</td><tr>'#13#10);
       end;
-      UrlEncodeName(w, n);
-      if not isFile then
-        w.AddDirect('/');
-      w.AddDirect('"', '>');
-      w.AddHtmlEscapeUtf8(n);
-      if not isFile then
-        w.AddDirect('/');
-      w.AddShort('</a></td><td>');
-      w.AddDateTime(@f^.Timestamp, ' ', #0, false, true);
-      w.AddShort('&nbsp;</td><td align="right">');
-      if isFile then
-        w.AddShort(KB(f^.Size))
-      else
-        w.AddDirect('-');
-      w.AddShort('</td><tr>'#13#10);
       inc(f);
     end;
     w.AddShort('</table>'#13#10'</body>'#13#10'</html>');
@@ -3322,7 +3327,7 @@ var
 begin
   Name := Path;
   i := Name.Len;
-  while i > 0 do // retrieve last
+  while i > 0 do // retrieve last path part, i.e. the resource name itself
   begin
     dec(i);
     if Name.Text[i] <> '/' then
@@ -3634,10 +3639,8 @@ end;
 function TMatchs.MatchString(const aText: string): integer;
 var
   temp: TSynTempBuffer;
-  len: integer;
 begin
-  len := StringToUtf8(aText, temp);
-  result := Match(temp.buf, len);
+  result := Match(StringToUtf8Temp(aText, temp), temp.len);
   temp.Done;
 end;
 

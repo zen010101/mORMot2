@@ -620,7 +620,7 @@ begin
   end;
 end;
 
-function GetDesktopWindow: PtrInt;
+function GetDesktopWindow: PtrUInt;
 begin
   result := 0; // fixed result on a window-abstracted system
 end;
@@ -697,7 +697,7 @@ begin
   result.Second := epoch - t * SecsPerMin;
 end;
 
-{$ifdef OSDARWIN} // OSX has no clock_gettime() API
+{$ifdef OSDARWIN} // OSX has no clock_gettime() API but its own MACH API
 
 type
   TTimebaseInfoData = record
@@ -1034,6 +1034,8 @@ begin
   {$ifdef OSPTHREADSLIB}
   if not Assigned(pthread_mutex_init) then
     raise EOSException.Create('TOSLightLock.Init: no pthread_mutex_init')
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif}
   else // no recursive attribute -> fast mutex
   {$endif OSPTHREADSLIB}
     pthread_mutex_init(@fMutex, nil);
@@ -1678,6 +1680,33 @@ begin
     fpmunmap(fBuf, fBufSize);
 end;
 
+// we tried sched_yield() on Linux, but since we spin for a while before calling
+// SwitchToThread, it made more syscalls for no wallclock benefit: nanosleep(10us)
+// seems a better solution, and also prevents pathological spinning if the
+// scheduler policy actually is not adapted to this usage
+{ $define OSLINUX_SCHEDYIELD}     // force sched_yield syscall on Linux
+{ $define OSLINUX_SCHEDYIELDONCE} // yield once during DoSpin() - no benefit
+
+{$ifdef OSLINUX_SCHEDYIELD}
+procedure SwitchToThread;
+begin
+  // called more often than nanosleep, with no actual benefit
+  Do_SysCall(syscall_nr_sched_yield); // properly defined in syscall.pp
+end;
+{$else}
+procedure SwitchToThread;
+var
+  t: TTimeSpec;
+begin
+  // note: nanosleep() may flood the kernel with timer/scheduling events under
+  // repeated calls - but here we spin-and-pause between calls so it is fine
+  t.tv_sec := 0;
+  t.tv_nsec := 1000; // 1us seems fair enough in respect to OS timers resolution
+  fpnanosleep(@t, nil);
+  // benchmarks show consistent 50us minimal for tiny requests, so 1us default
+  // could prevent the kernel to jitter with too small intervals like 10ns
+end;
+{$endif OSLINUX_SCHEDYIELD}
 
 procedure SleepHiRes(ms: cardinal);
 var
@@ -1689,9 +1718,10 @@ begin
     // handle SleepHiRes(0) special case
     if SleepHiRes0Yield then
     begin
-      // warning: reported as buggy by Alan on POSIX, and despitable by Linus
+      // reported as unreliable by Alan on most POSIX, and despitable by Linus
       // - from our testing, it gives worse performance than fpnanosleep()
-      ThreadSwitch; // call e.g. POSIX libc's sched_yield API
+      // when waiting for some event (but may be sometimes used for spinning)
+      ThreadSwitch; // FPC RTL redirects to pthread_yield()
       exit;
     end
     else
@@ -1706,17 +1736,6 @@ begin
   end;
   fpnanosleep(@timeout, nil)
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
-end;
-
-procedure SwitchToThread;
-var
-  timeout: Ttimespec;
-begin
-  // nanosleep() seems better than FPC RTL ThreadSwitch = POSIX libc sched_yield
-  timeout.tv_sec := 0;
-  timeout.tv_nsec := 10; // empirically identified on a recent Linux Kernel
-  // note: nanosleep() adds a few dozen of microsecs for context switching
-  fpnanosleep(@timeout, nil);
 end;
 
 
@@ -1930,6 +1949,7 @@ const
   {$endif CPUX86}
   // other archs (like aarch64) are properly defined - see https://syscall.sh
 
+
 { TSystemD }
 
 procedure TSystemD.DoLoad;
@@ -2099,10 +2119,6 @@ end;
 
 // we bypass crt.pp since this unit cancels the SIGINT signal
 
-procedure AllocConsole;
-begin
-end;
-
 var
   ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
   TextAttr: integer = -1; // always change the color at startup
@@ -2214,8 +2230,10 @@ begin
     until false;
   end
   else
+  begin
     ReadLn;
-  ioresult;
+    ioresult;
+  end;
 end;
 {$I+}
 
@@ -3394,6 +3412,7 @@ begin
   // GetHeapStatus is only about current thread -> use /proc/[pid]/statm
   if LoadProcFile('/proc/self/statm', tmp) <= 0 then
     exit;
+  P := @tmp;
   info.allocreserved := QWord(_GetNextCardinal(P)) * SystemInfo.dwPageSize; // VmSize
   info.allocused     := QWord(_GetNextCardinal(P)) * SystemInfo.dwPageSize; // VmRSS
 end;
@@ -3402,7 +3421,7 @@ procedure XorOSEntropy(var e: THash512Rec);
 var
   tmp: TBuffer4K;
   si: TSysInfo  absolute tmp; // Linuxism
-  rt: TTimeSpec absolute tmp; // with nanoseconds resolution
+  rt: TTimeSpec absolute tmp; // in nanoseconds resolution
 begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt);
   DefaultHasher128(@e.h0, @rt, SizeOf(rt)); // maybe AesNiHash128
@@ -3411,18 +3430,20 @@ begin
   // detailed CPU execution context and timing from Linux kernel
   DefaultHasher128(@e.h0, @tmp, LoadProcFile('/proc/self/statm', tmp));
   DefaultHasher128(@e.h0, @tmp, LoadProcFile('/proc/self/stat', tmp));
+  DefaultHasher128(@e.h0, @tmp, LoadProcFile('/proc/self/io', tmp));
   DefaultHasher128(@e.h1, @tmp, LoadProcFile('/proc/stat', tmp));
   clock_gettime(CLOCK_UPTIME, @rt);
   DefaultHasher128(@e.h2, @rt, SizeOf(rt));
-  // read-only 122-bit random UUID text '6fd5a44b-35f4-4ad4-a9b9-6b9be13e1fe9'
-  DefaultHasher128(@e.h2, @tmp, LoadProcFile('/proc/sys/kernel/random/uuid', tmp));
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt); // should have changed in-between
   DefaultHasher128(@e.h3, @rt, SizeOf(rt));
   {$ifdef HASGETRANDOM}
   // eventually XOR with getrandom syscall if available
   if LinuxGetRandom(@tmp, SizeOf(e)) then
-    XorMemory(@e, @tmp, SizeOf(e));
+    XorMemory(@e, @tmp, SizeOf(e))
+  else
   {$endif HASGETRANDOM}
+    // read-only 122-bit random UUID text '6fd5a44b-35f4-4ad4-a9b9-6b9be13e1fe9'
+    DefaultHasher128(@e.h2, @tmp, LoadProcFile('/proc/sys/kernel/random/uuid', tmp));
 end;
 
 {$ifdef OSANDROID}
@@ -3610,24 +3631,28 @@ procedure __Fill256FromOs(out e: THash256Rec);
 var
   si: TSysInfo;  // Linuxism, but properly emulated by thit unit on Mac/BSD
 begin
-  // no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
+  // - no FillSystemRandom() to avoid endless recursive calls in XorEntropy()
+  // - is called once at startup from mormot.core.data
   {$ifdef OSDARWIN} // OSX has no clock_gettime() API
   e.d0 := mach_absolute_time   * 2654435761;
   e.d1 := mach_continuous_time * 3266489917;
-  crcblock(@e.l, @SystemEntropy.Startup);
   {$else}
   if SizeOf(timespec) <= SizeOf(e) then // paranoid (max 128-bit) -> no-op
     clock_gettime(CLOCK_MONOTONIC_FAST, @e); // fast VDSO call
-  crcblock(@e.l, @SystemEntropy.Startup); // 128-bit entropy over nanoseconds
   {$endif OSDARWIN}
+  crcblock(@e.l, @SystemEntropy.Startup); // 128-bit entropy over nanoseconds
   {$ifdef OSLINUX}
   if LinuxGetRandom(@e.h, SizeOf(e.h)) then // 128-bit crypto-PRNG in 1 syscall
     exit;
   {$endif OSLINUX}
   RetrieveSysInfo(si); // at least uptime + cpu load + free mem on all OS
   DefaultHasher128(@e.h, @si, SizeOf(si)); // maybe AesNiHash128
-  if SystemEntropy.LiveFeed.c0 = 0 then
-    crcblocks(@SystemEntropy.LiveFeed, @e, 2); // we need something
+  {$ifndef CPUINTEL}
+  if SystemEntropy.LiveFeed.c0 = 0 then       // may happen on BSD and MAC ARM
+    crcblocks(@SystemEntropy.LiveFeed, @e, 2) // put something here
+  else
+  {$endif CPUINTEL}
+    crcblock(@e.h, @SystemEntropy.LiveFeed);  // obfuscate
 end;
 
 const
@@ -3647,7 +3672,7 @@ begin
   result := false;
   if Len <= 0 then
     exit;
-  // retrieve up to MAXFROMOS bytes max from OS
+  // retrieve up to MAXFROMOS=256 bytes max
   rd := MinPtrInt(Len, MAXFROMOS);
   {$ifdef OSLINUX} // a single syscall to rule them all on Linux
   result := LinuxGetRandom(Buffer, rd);
@@ -3685,11 +3710,12 @@ begin
     dec(Len, rd);
     if Len = 0 then
       exit;
-    Buffer := @Buffer[rd];
-  end; // on OS API call failure (paranoid): fallback to TLecuyer (if allowed)
-  if Len > 0 then
-    // use TLecuyer gsl_rng_taus2 for the remaining bytes > MAXFROMOS (unlikely)
-    // - but keep result=false if the Buffer^ was not really filled from OS
+    // diffusion/padding of remaining bytes > rd=MAXFROMOS=256 (unlikely)
+    LecuyerDiffusion(@Buffer[MAXFROMOS], Len, pointer(Buffer)); // gsl_rng_taus2
+  end
+  else
+    // on OS API call failure (paranoid): fallback to TLecuyer
+    // - keep result=false if the Buffer^ was not really filled from OS
     SharedRandom.Fill(Buffer, Len);
 end;
 
@@ -4029,18 +4055,78 @@ begin
      raise EOSException.Create('ReserveExecutableMemoryPageAccess: mprotect fail');
 end;
 
+
 const
-  MAP_LARGE = MAP_PRIVATE or MAP_ANONYMOUS;
+  // Transparent Huge Pages (THP) exist since Linux 2.6.38, Superpages provide
+  // a similar benefit on FreeBSD, and macOS is less predictable but likely
+  // to prefer such alignement
+  // - so we ensure large blocks are always 2MB aligned on all POSIX systems
+  // - note that Windows has no such automated mechanism, requires explicit
+  // MEM_LARGE_PAGES flag and - even worse - enabling SeLockMemoryPrivilege
+  PMD_SIZE = 2 shl 20;
+  PMD_MASK = PMD_SIZE - 1; // aligned := (size + align - 1) AND NOT (align - 1)
+
+{.$define OSLINUXHUGEPAGES}
+// Huge Pages pool is void by default on most distros, and affects only mremap
+// - so it is disabled but you may experiment using this conditional
+// - in practice, THP is the preferred way and aligning to PMD_SIZE is enough
+
+{$ifdef OSLINUXHUGEPAGES} // try Huge Page support on x86_64 and ARM64
+const
+  /// populate (prefault) pagetables to avoid page faults later - since 2.5.46
+  // - even for large blocks, it may not be a good idea - not set
+  MAP_POPULATE = $08000;
+
+const
+  /// explicit huge pages - with MAP_HUGE_2MB since Kernel 3.8
+  MAP_HUGETLB    = $40000;
+  MAP_HUGE_SHIFT = 26;
+  MAP_HUGE_2MB   = 21 shl MAP_HUGE_SHIFT; // modifier combined with MAP_HUGETLB
+
+var
+  MAP_HUGE_SIZE: PtrUInt; // equals PMD_SIZE = 2MB since Kernel 3.8
 
 function _GetLargeMem(BigSize: PtrUInt): pointer;
+var
+  flags: cardinal;
 begin
-  result := fpmmap(nil, BigSize, PROT_READ or PROT_WRITE, MAP_LARGE, -1, 0);
+  flags := MAP_PRIVATE or MAP_ANONYMOUS;
+  if BigSize >= PMD_SIZE * 2 then
+    BigSize := (BigSize + PMD_MASK) and not PMD_MASK;
+  if (MAP_HUGE_SIZE <> 0) and
+     (BigSize >= PMD_SIZE * 8) then
+  begin
+    flags := flags or MAP_HUGETLB or MAP_HUGE_2MB;
+    result := fpmmap(nil, BigSize, PROT_READ or PROT_WRITE, flags, -1, 0);
+    if result <> MAP_FAILED then
+      exit;
+    // on mmap() failure, /proc/sys/vm/nr_hugepages is likely to be 0
+    // - check   "cat /proc/meminfo | grep HugePages_Free"
+    // - and try "echo 1000 > /proc/sys/vm/nr_hugepages" as root
+    // - but we did not see any noticeable benefit for this process
+    MAP_HUGE_SIZE := 0; // disable this feature from now on
+    flags := MAP_PRIVATE or MAP_ANONYMOUS;
+  end;
+  result := fpmmap(nil, BigSize, PROT_READ or PROT_WRITE, flags, -1, 0);
   if result = MAP_FAILED then
     result := nil; // as VirtualAlloc()
 end;
+{$else}
+function _GetLargeMem(BigSize: PtrUInt): pointer;
+begin
+  if BigSize >= PMD_SIZE * 2 then  // ensure 2MB aligned for Size >= 4MB
+    BigSize := (BigSize + PMD_MASK) and not PMD_MASK;
+  result := fpmmap(nil, BigSize,
+    PROT_READ or PROT_WRITE, MAP_PRIVATE or MAP_ANONYMOUS, -1, 0);
+  if result = MAP_FAILED then
+    result := nil; // as VirtualAlloc()
+end;
+{$endif OSLINUXHUGEPAGES}
 
 procedure _FreeLargeMem(p: pointer; BigSize: PtrUInt);
 begin
+  if BigSize >= PMD_SIZE * 2 then
+    BigSize := (BigSize + PMD_MASK) and not PMD_MASK; // as in mmap()
   fpmunmap(p, BigSize);
 end;
 
@@ -4484,12 +4570,12 @@ var
   f: file;
   fd: THandle;
   pid, res, wr: cint;
-  n, l: TSsize;
+  n: TSsize;
   wait: cardinal;
   endtix: Int64;
   tmp: TBuffer64K;
 
-  function RedirectOutput(flush: boolean; var redir: RawByteString): boolean;
+  function RedirectOutput(killing: boolean; var redir: RawByteString): boolean;
   var
     u: RawUtf8;
   begin
@@ -4501,27 +4587,18 @@ var
         exit; // pipe closed or EINTR = execution finished
       if setresult and
          (n <> 0) then
-      begin
-        if redir = '' then
-          FastSetString(RawUtf8(redir), @tmp, n) // assume CP_UTF8
-        else
-        begin
-          SetLength(redir, l + n); // append
-          MoveFast(tmp, PByteArray(redir)[l], n);
-        end;
-        inc(l, n);
-      end;
+        AppendBufferToUtf8(@tmp, n, RawUtf8(redir)); // assume CP_UTF8
       if Assigned(onoutput) then
       begin
         FastSetString(u, @tmp, n); // console output is likely UTF-8 on POSIX
         if onoutput(u, pid) and
-           not flush then
+           not killing then
           endtix := 1; // returned true: force kill() on abort
       end;
     end
     else if Assigned(onoutput) and // idle
             onoutput('', pid) and
-            not flush then
+            not killing then
       endtix := 1; // returned true to abort -> kill()
     result := true;
   end;
@@ -4537,17 +4614,15 @@ begin
   if Assigned(onoutput) then
     onoutput('', pid);
   wait := 200;
-  if waitfordelayms = INFINITE then
-    endtix := 0
-  else
+  endtix := 0;
+  if waitfordelayms <> INFINITE then
   begin
-    endtix := GetTickCount64 + waitfordelayms;
     if waitfordelayms < wait then
       wait := waitfordelayms;
+    endtix := GetTickCount64 + waitfordelayms;
   end;
-  l := 0;
   repeat
-    if not RedirectOutput({flush=}false, result) then
+    if not RedirectOutput({killing=}false, result) then
       break; // pipe closed = execution finished
     if (endtix <> 0) and
        (GetTickCount64 > endtix) then
@@ -4561,8 +4636,8 @@ begin
         begin
           endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000;
           repeat
-            wr := FpWaitPid(pid, @res, WNOHANG);  // 0 = no state change
-            RedirectOutput({flush=}true, result); // continue redirection
+            wr := FpWaitPid(pid, @res, WNOHANG);    // 0 = no state change
+            RedirectOutput({killing=}true, result); // continue redirection
             if (wr <> 0) or
                (GetTickCount64 > endtix) then
               break;
@@ -4851,8 +4926,8 @@ var
   act, aci: TIntegerDynArray;
   i: PtrInt;
   {$endif CPUARM3264}
-  tpfail: byte;
-  tp: array[0..2] of timespec;
+  tpfail: integer;
+  tp: array[0 .. 1{$ifdef OSLINUX} + 2{$endif}] of timespec;
   {$endif OSDARWIN}
   {$ifdef OSBSDDARWIN}
   temp1, temp2: ShortString;
@@ -4878,7 +4953,7 @@ begin
   if ahcCrc32 in CpuFeatures then
     try
       if (crc32cby4arm64(0, 1) = 3712330424) and
-         (crc32carm64(0, @tp, SizeOf(tp)) = crc32cfast(0, @tp, SizeOf(tp))) then
+         (crc32carm64(0, @uts, SizeOf(uts)) = crc32cfast(0, @uts, SizeOf(uts))) then
       begin
         crc32c          := @crc32carm64;
         DefaultHasher   := @crc32carm64;
@@ -4887,7 +4962,7 @@ begin
         crcblock        := @crc32blockarm64;
         crcblocks       := @crc32blocksarm64;
       end;
-      if crc32arm64(0, @tp, SizeOf(tp)) = crc32fast(0, @tp, SizeOf(tp)) then
+      if crc32arm64(0, @uts, SizeOf(uts)) = crc32fast(0, @uts, SizeOf(uts)) then
         crc32 := @crc32arm64;
     except
       exclude(CpuFeatures, ahcCrc32); // crc32 was actually not supported
@@ -5113,6 +5188,11 @@ begin
   // intialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset;
   _Fill256FromOs    := @__Fill256FromOs;
+  {$ifdef OSLINUX}
+  {$ifdef OSLINUXHUGEPAGES}
+  if KernelRevision >= $030800 then // since Kernel 3.8
+    MAP_HUGE_SIZE := PMD_SIZE; // explicit huge pages for _GetLargeMem()
+  {$endif OSLINUXHUGEPAGES}
   {$ifdef HASGETRANDOM}
   if KernelRevision < $031100 then // since Kernel 3.17
     include(_F0, fLinuxGetRandomFailed);
@@ -5121,6 +5201,7 @@ begin
   if KernelRevision < $02061b then // since Kernel 2.6.27
     include(_F0, fLinuxEventFdFailed);
   {$endif HASEVENTFD}
+  {$endif OSLINUX}
   // for inlined RTL calls (avoid one level of redirection)
   {$ifndef NODIRECTTHREADMANAGER}
   GetThreadManager(tm);
@@ -5155,8 +5236,12 @@ begin
     CLOCK_MONOTONIC_HIRES := CLOCK_MONOTONIC_RAW
   else if clock_gettime(CLOCK_MONOTONIC_HIRES, @tp[2]) <> 0 then
     tpfail := tpfail or 4;
+  if clock_gettime(CLOCK_BOOTTIME, @tp[3]) = 0 then // 2.6.39+
+    CLOCK_UPTIME := CLOCK_BOOTTIME
+  else if clock_gettime(CLOCK_UPTIME, @tp[3]) <> 0 then
+    tpfail := tpfail or 8;
   {$endif OSLINUX}
-  crc32c128(@SystemEntropy.Startup, @tp, SizeOf(tp)); // tp[0..2] in nanoseconds
+  crc32c128(@SystemEntropy.Startup, @tp, SizeOf(tp)); // tp[0..n] in nanoseconds
   // CpuCache, Executable.Hash, CpuFeatures will be added in main mormot.core.os
   if tpfail <> 0 then
     ConsoleErrorWrite(_fmt('clock_gettime(%d) failed on %s - errno=%d',

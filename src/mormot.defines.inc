@@ -58,7 +58,11 @@
 // - you can enable it if you find out some compatibility problem
 
 {$ifdef CPUX86}
-  {.$define HASNOSSE2} // force x87 code on very very old CPU
+  {.$define HASNOSSE2}
+  // if defined, bypass SSE2 asm on i386 and fallback to pascal code or x87 asm
+  // - SSE2 was introduced with Intel’s Pentium 4 (2000) so we assume it
+  // - Windows requires SSE2 since XP SP2, and FireFox/Chrome since 2017
+  // - we keep this possibility for specific applications on deprecated HW
 {$endif CPUX86}
 
 {.$define NOSYNDBZEOS}
@@ -83,8 +87,7 @@
 // disable POSIX mormot.lib.gsssapi support in mormot.rest.client/server units
 
 {.$define NOPOINTEROFFSET}
-// disable TOrmTable offsets on 64-bit if your memory is huge or fragmented
-// note: FPCMM_MEDIUM32BIT may need this for data >256KB
+// disable TOrmTable offsets on 64-bit for JSON > 2GB
 
 {.$define NOTORMTABLELEN}
 // disable TOrmTable internal fLen[] pre-computed table - slower but less memory
@@ -132,7 +135,7 @@
     HASITERATORS HASIMPLICITOPERATOR HASDBFTWIDE HASDBFNEW
     HASTTHREADSTART HASTTHREADTERMINATESET HASINTERFACEASTOBJECT
     HASEXTRECORDRTTI
-    CPU32 CPU64 CPUINTEL CPUX86 CPUX64 CPUARM3264 CPUARM CPUAARCH64
+    CPU32 CPU64 CPUINTEL CPUX86 CPUX64 CPUSSE2 CPUARM3264 CPUARM CPUAARCH64
     CPUX86NOTPIC CPUX64ASM ASMINTEL ASMX86 ASMX64AVX ASMX64AVXNOCONST HASAESNI
     TSYNEXTENDED80 EXTENDEDTOSHORT_USESTR DOUBLETOSHORT_USEGRISU HASSLOWMUL64
     OSWINDOWS OSPOSIX OSBSD OSDARWIN OSBSDDARWIN OSOPENBSD OSFREEBSD
@@ -141,7 +144,7 @@
     PUREMORMOT2
 
   FPC only:
-    FPC FPC_HAS_CONSTREF FPC_32 FPC_64 FPC_CPUX64 FPC_PIC
+    FPC FPC_HAS_CONSTREF FPC_32 FPC_64 FPC_CPUINTEL FPC_X86 FPC_CPUX64 FPC_PIC
     FPC_REQUIRES_PROPER_ALIGNMENT HASINLINEWINAPI HASDIRECTTYPEINFO
     FPCBSD FPCDARWIN FPCLINUX FPCANDROID
     FPC_X64MM
@@ -364,6 +367,7 @@
     {$endif CPUX64}
     {$ifdef CPUAARCH64}
       {$define FPC_CPUARM}     // circumvent bug e.g. about sets in registers
+      {$define FPC_CPUAARCH64}
     {$endif CPUAARCH64}
   {$else}
     // 32-bit Architecture
@@ -707,8 +711,12 @@
     {$if CompilerVersion >= 36.0} // = Delphi 12 Athens
       {$define ISDELPHI12}
     {$ifend}
-    {$if CompilerVersion >= 37.0} // = Delphi 13 Next
+    {$if CompilerVersion >= 37.0} // = Delphi 13 Florence
       {$define ISDELPHI13}
+      {$define VER370inlinebug} // circumvent Delphi 13 bug
+    {$ifend}
+    {$if CompilerVersion >= 38.0} // = Delphi 14 Next
+      {$define ISDELPHI14}
     {$ifend}
   {$else}
      {$define ISDELPHI7}
@@ -789,6 +797,12 @@
     {$define OSLINUXINTEL}
     {$define OSLINUXX64}
   {$endif CPUX64}
+  {$ifdef CPU32}
+    {$define OSLINUX32}
+  {$endif CPU32}
+  {$ifdef CPU64}
+    {$define OSLINUX64}
+  {$endif CPU64}
 {$endif OSLINUX}
 {$ifdef OSANDROID}
   {$define OSLINUXANDROID}
@@ -806,6 +820,7 @@
 // -----------
 // -- CPU specific conditionals
 
+{$undef CPUSSE2}
 {$ifdef CPUINTEL}
   {$ifdef OSWINDOWS}
     {$define OSWINTEL}
@@ -825,6 +840,13 @@
     {$endif CPUX64}
   {$endif OSPOSIX}
   {$define CPUINTELARM}
+  {$ifdef CPUX86}
+    {$ifndef HASNOSSE2} // conditional to compile for oldest CPUs
+      {$define CPUSSE2}
+    {$endif HASNOSSE2}
+  {$else}
+    {$define CPUSSE2} // x86_64 has SSE2
+  {$endif CPUX86}
 {$else}
   {$ifdef OSWINDOWS}
     {$ifdef CPUAARCH64}

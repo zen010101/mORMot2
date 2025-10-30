@@ -1930,7 +1930,7 @@ type
     fSearchResult: TLdapResultList;
     fSearchRange: TLdapResultList;
     fDefaultDN, fRootDN, fConfigDN, fVendorName, fServiceName: RawUtf8;
-    fNetbiosDN: RawUtf8;
+    fNetbiosDN, fSchemaDN: RawUtf8;
     fMechanisms, fControls, fExtensions, fNamingContexts: TRawUtf8DynArray;
     fSecContext: TSecContext;
     fBoundUser: RawUtf8;
@@ -2009,6 +2009,9 @@ type
     /// the published "configurationNamingContext" attribute in the Root DSE
     // - use an internal cache for fast retrieval
     function ConfigDN: RawUtf8;
+    /// the published "schemaNamingContext" attribute in the Root DSE
+    // - use an internal cache for fast retrieval
+    function SchemaDN: RawUtf8;
     /// the NETBIOS domain name, empty string if not found
     // - retrieved from the CN=Partitions of this server's ConfigDN
     // - use an internal cache for fast retrieval
@@ -5825,6 +5828,7 @@ begin
     except
       on E: Exception do
       begin
+        result := False;
         FreeAndNil(fSock); // abort and try next dc[]
         SetUnknownError('Connect %: %', [E, E.Message]);
       end;
@@ -5863,6 +5867,7 @@ begin
     'defaultNamingContext',
     'namingContexts',
     'configurationNamingContext',
+    'schemaNamingContext',
     'supportedSASLMechanisms',
     'supportedControl',
     'supportedExtension',
@@ -5882,6 +5887,7 @@ begin
       fDefaultDN := fNamingContexts[0];
   end;
   fConfigDN       := root.Attributes.GetByName('configurationNamingContext');
+  fSchemaDN       := root.Attributes.GetByName('schemaNamingContext');
   fMechanisms     := root.Attributes.Find('supportedSASLMechanisms').GetAllReadable;
   fControls       := root.Attributes.Find('supportedControl').GetAllReadable;
   DeduplicateRawUtf8(fControls);
@@ -5922,6 +5928,13 @@ begin
   if not (fRetrieveRootDseInfo in fFlags) then
     RetrieveRootDseInfo;
   result := fConfigDN;
+end;
+
+function TLdapClient.SchemaDN: RawUtf8;
+begin
+  if not (fRetrieveRootDseInfo in fFlags) then
+    RetrieveRootDseInfo;
+  result := fSchemaDN;
 end;
 
 function TLdapClient.VendorName: RawUtf8;
@@ -6142,8 +6155,8 @@ begin
     // get as much as possible unciphered data from socket
     fSockBuffer := fSock.SockReceiveString(@res, @err);
   if fSockBuffer = '' then
-    ELdap.RaiseUtf8('%.ReceivePacket: error #% % from %:%', [self,
-      err, ToText(res)^, fSettings.TargetHost, fSettings.TargetPort]);
+    ELdap.RaiseUtf8('%.ReceivePacket: error #% % from %:%',
+      [self, err, _NR[res], fSettings.TargetHost, fSettings.TargetPort]);
   {$ifdef ASNDEBUG}
   ConsoleWrite('Packet received bytes = %', [length(fSockBuffer)]);
   {$endif ASNDEBUG}
@@ -6668,6 +6681,8 @@ begin
     fRootDN := '';
     fDefaultDN := '';
     fConfigDN := '';
+    fSchemaDN := '';
+    fNetbiosDN := '';
   end;
 end;
 

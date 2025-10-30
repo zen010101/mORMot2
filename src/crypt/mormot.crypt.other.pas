@@ -338,7 +338,7 @@ procedure BlowFishEncryptCtr(src, dest: PQWord; len: PtrUInt;
 procedure BlowFishCtrInc(iv: PQWord); {$ifndef CPUINTEL} inline; {$endif}
 
 /// regular BlowFish key setup with a given salt and UTF-8 password
-// - salt is expected to be 16 bytes = 128-bit, e.g. from Random128()
+// - Salt is expected to be 16 bytes = 128-bit, e.g. from Random128()
 // - Password will be passed to BlowFishPrepareKey() - so trimmed to 72 bytes -
 // before calling the overloaded BlowFishKeySetup() binary function
 procedure BlowFishKeySetup(var State: TBlowFishState;
@@ -420,17 +420,21 @@ const
 
 /// BCrypt password hashing function as used on BSD systems
 // - this adaptative algorithm has no known weaknesses, and there are reports
-// that the more recent Argon2 is weaker (and less proven) for practical timing
-// - Cost should be in range 4..31 for 2^Cost rounds (default value is 12)
+// that the more recent Argon2 is weaker (and less proven) for practical timing,
+// and SCrypt requires N>=2^14 to be stronger (i.e. at least 16MB), so BCrypt
+// seems still the best solution for server-side password hashing
+// - Cost should be in range 4..31 for 2^Cost rounds (default value is 12, and
+// takes 180ms on my computer)
 // - Salt='' would generate one - or should be exactly 22 characters (16 bytes)
-// - PreSha256 would HMAC-SHA-256 the password (returning $bcrypt-sha256$)
+// - PreSha256 would HMAC-SHA-256 the password (returning $bcrypt-sha256$) to
+// circumvent the initial password length limitation of 72 chars
 // - assigned to mormot.crypt.core.pas BCrypt() redirection by this unit
-// - returns e.g. '$2b$<cost>$<salt><checksum>' or
-// '$bcrypt-sha256$v=2,t=2b,r=<cost>$<salt'$
+// - returns e.g. '$2b$<cost>$<salt><checksum>' for the regular BSD format or
+// '$bcrypt-sha256$v=2,t=2b,r=<cost>$<salt'$ for the passlib extended format
 function BCryptHash(const Password: RawUtf8; const Salt: RawUtf8 = '';
  Cost: byte = 12; HashPos: PInteger = nil; PreSha256: boolean = false): RawUtf8;
 
-/// prepare a BlockFish encryption with a given Salt, UTF-8 Passwod and Cost
+/// prepare a BlockFish encryption with a given Salt, UTF-8 Password and Cost
 // - Password is process using the BCrypt "Expensive Key Setup" algorithm
 // - Cost should be in range 4..31
 // - Salt is expected to be 16 bytes = 128-bit, e.g. from Random128()
@@ -440,12 +444,20 @@ procedure BCryptExpensiveKeySetup(var State: TBlowFishState;
 
 { **************** SCrypt Password-Hashing Function }
 
+/// apply in-place Salsa20/8 transformation over a 64 bytes buffer
+procedure Salsa20x8(B: PCardinalArray);
+
 /// low-level SCrypt hash computation using our pure pascal code
-// - this unit SSE2 code is faster than mormot.lib.openssl11 wrapper:
-// $ on Win32:     RawSCrypt in 143ms, OpenSslScrypt in 157ms
-// $ on Win64:     RawSCrypt in 123ms, OpenSslScrypt in 100ms
-// $ on Linux x64: RawSCrypt in 77ms,  OpenSslScrypt in 103ms
+// - the tuned SSE2 code of this unit is faster than mormot.lib.openssl11:
+// $ on Win32:     RawSCrypt in 101ms, OpenSslScrypt in 157ms
+// $ on Win64:     RawSCrypt in 92ms,  OpenSslScrypt in 124ms
+// $ on Linux x64: RawSCrypt in 74ms,  OpenSslScrypt in 103ms
 // - assigned to mormot.crypt.core.pas SCrypt() redirection by this unit
+// - for password storage and interactive login, consider SCryptHash() from
+// mormot.crypt.secure.pas with N=65536=2^16, R=8, P=2 (148ms and 64MB of RAM)
+// - for local key derivation (e.g. file encryption) consider using this
+// function directly with e.g. N=1048576=2^20, R=8, P=1 (1.23s and 1GB) to
+// compute the binary encryption key
 function RawSCrypt(const Password: RawUtf8; const Salt: RawByteString;
   N, R, P, DestLen: PtrUInt): RawByteString;
 
@@ -453,6 +465,12 @@ function RawSCrypt(const Password: RawUtf8; const Salt: RawByteString;
 // - could be used to tune the parameters (N, R, P) somewhat obfuscated meaning
 // - return e.g. 16MB for SCrypt(16384, 8, 1) and 64MB for SCrypt(65536, 8, 1),
 // i.e. equals roughtly N * R * 128 with some more bytes depending on P
+// - SCrypt(16384, 8, 1) are the recommended minimal parameters value to have
+// benefits against BCrypt() - but still consuming 16MB instead of 4KB so may
+// not be ideal for password storage on server side, but fine for a client-side
+// one-time key derivation function to unlock a resource
+// - TL&WR: use N=65536=2^16, R=8, P=2 for safe interactive login (148ms and
+// 64MB of RAM) or N=1048576=2^20, R=8, P=1 for file encryption (1.23s and 1GB)
 function SCryptMemoryUse(N, R, P: QWord): QWord;
 
 
@@ -1854,6 +1872,8 @@ begin
          (length(saltbin) <> BCRYPT_SALTLEN) then // always 16 bytes
     exit;
   // initialize BlowFish state from Password using BCrypt "Expensive Key Setup"
+  if Cost = 0 then
+    Cost := 12; // default cost - e.g. from plain ModularCryptHash() wrapper
   if PreSha256 then
   begin
     // https://passlib.readthedocs.io/en/stable/lib/passlib.hash.bcrypt_sha256.html
@@ -1895,8 +1915,488 @@ end;
 
 { **************** SCrypt Password-Hashing Function }
 
-{$ifdef CPUX64} // our SSE2 optimized version - faster than OpenSSL
+{$ifdef CPUINTEL}
+{$ifdef CPUX64}
 
+{$ifdef FPC}
+  {$WARN 7105 off : Use of -offset(%esp) }
+  {$WARN 7121 off : Check size of memory operand }
+  {$WARN 7122 off : Check size of memory operand }
+{$endif FPC}
+
+procedure Salsa20x8(B: PCardinalArray);
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        push    rbp
+        push    r15
+        push    r14
+        push    r13
+        push    r12
+        push    rbx
+        sub     rsp, 40
+        movups  xmm0, dqword ptr [B]
+        movups  xmm1, dqword ptr [B + 16]
+        movups  xmm2, dqword ptr [B + 32]
+        movups  xmm3, dqword ptr [B + 48]
+        mov     qword ptr [rsp - 32], B
+        movaps  [rsp - 128], xmm0
+        movaps  [rsp - 80],  xmm3
+        movaps  [rsp - 112], xmm1
+        movaps  [rsp - 96],  xmm2
+        mov     r11d, dword ptr [rsp - 128]
+        mov     r8d, dword ptr [rsp - 124]
+        mov     ecx, dword ptr [rsp - 80]
+        mov     edi, dword ptr [rsp - 76]
+        mov     eax, dword ptr [rsp - 112]
+        mov     r15d, dword ptr [rsp - 108]
+        mov     r12d, dword ptr [rsp - 96]
+        mov     ebp, dword ptr [rsp - 92]
+        mov     ebx, dword ptr [rsp - 88]
+        mov     r9d, dword ptr [rsp - 104]
+        mov     r13d, dword ptr [rsp - 72]
+        mov     edx, dword ptr [rsp - 120]
+        mov     qword ptr [rsp - 48], rdx
+        mov     r14d, dword ptr [rsp - 68]
+        mov     r10d, dword ptr [rsp - 84]
+        mov     edx, dword ptr [rsp - 116]
+        mov     qword ptr [rsp - 56], rdx
+        mov     qword ptr [rsp - 40], 4
+        mov     esi, dword ptr [rsp - 100]
+        {$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@s:     lea     edx, [rcx + r11]
+        rol     edx, 7
+        xor     edx, eax
+        mov     qword ptr [rsp], rdx
+        lea     eax, [rdx + r11]
+        rol     eax, 9
+        xor     eax, r12d
+        mov     r12, rax
+        mov     qword ptr [rsp + 24], rax
+        add     eax, edx
+        rol     eax, 13
+        xor     eax, ecx
+        mov     qword ptr [rsp + 32], rax
+        add     r12d, eax
+        rol     r12d, 18
+        lea     eax, [r8 + r15]
+        rol     eax, 7
+        xor     eax, ebp
+        mov     qword ptr [rsp + 8], rax
+        lea     ecx, [rax + r15]
+        rol     ecx, 9
+        xor     ecx, edi
+        mov     qword ptr [rsp + 16], rcx
+        add     eax, ecx
+        rol     eax, 13
+        xor     eax, r8d
+        lea     ebp, [rax + rcx]
+        rol     ebp, 18
+        xor     r12d, r11d
+        lea     ecx, [r9 + rbx]
+        rol     ecx, 7
+        xor     ecx, r13d
+        mov     qword ptr [rsp - 8], rcx
+        lea     r11d, [rcx + rbx]
+        rol     r11d, 9
+        xor     r11d, dword ptr [rsp - 48]
+        add     ecx, r11d
+        rol     ecx, 13
+        xor     ecx, r9d
+        lea     edx, [rcx + r11]
+        rol     edx, 18
+        xor     ebp, r15d
+        lea     r9d, [r10 + r14]
+        rol     r9d, 7
+        xor     r9d, dword ptr [rsp - 56]
+        lea     r15d, [r9 + r14]
+        rol     r15d, 9
+        xor     r15d, esi
+        lea     edi, [r15 + r9]
+        rol     edi, 13
+        xor     edi, r10d
+        lea     r13d, [rdi + r15]
+        rol     r13d, 18
+        xor     edx, ebx
+        lea     r8d, [r9 + r12]
+        rol     r8d, 7
+        xor     r8d, eax
+        lea     eax, [r8 + r12]
+        rol     eax, 9
+        xor     eax, r11d
+        lea     esi, [rax + r8]
+        rol     esi, 13
+        xor     esi, r9d
+        mov     qword ptr [rsp - 56], rsi
+        mov     qword ptr [rsp - 48], rax
+        lea     r11d, [rsi + rax]
+        rol     r11d, 18
+        xor     r13d, r14d
+        mov     r10, qword ptr [rsp]
+        lea     r9d, [r10 + rbp]
+        rol     r9d, 7
+        xor     r9d, ecx
+        lea     esi, [r9 + rbp]
+        mov     rcx, rbp
+        rol     esi, 9
+        xor     esi, r15d
+        lea     eax, [rsi + r9]
+        rol     eax, 13
+        xor     eax, r10d
+        lea     r15d, [rax + rsi]
+        rol     r15d, 18
+        xor     r11d, r12d
+        mov     qword ptr [rsp - 16], rdx
+        mov     rbx, qword ptr [rsp + 8]
+        lea     r10d, [rdx + rbx]
+        rol     r10d, 7
+        xor     r10d, edi
+        lea     r12d, [r10 + rdx]
+        rol     r12d, 9
+        xor     r12d, dword ptr [rsp + 24]
+        lea     ebp, [r12 + r10]
+        rol     ebp, 13
+        xor     ebp, ebx
+        lea     ebx, [r12 + rbp]
+        rol     ebx, 18
+        xor     r15d, ecx
+        mov     rdx, qword ptr [rsp - 8]
+        mov     qword ptr [rsp - 24], r13
+        lea     ecx, [rdx + r13]
+        rol     ecx, 7
+        xor     ecx, dword ptr [rsp + 32]
+        lea     edi, [rcx + r13]
+        rol     edi, 9
+        xor     edi, dword ptr [rsp + 16]
+        lea     r13d, [rdi + rcx]
+        rol     r13d, 13
+        xor     r13d, edx
+        lea     r14d, [rdi + r13]
+        rol     r14d, 18
+        xor     ebx, dword ptr [rsp - 16]
+        xor     r14d, dword ptr [rsp - 24]
+        dec     byte ptr [rsp - 40]
+        jnz     @s
+        mov     dword ptr [rsp - 128], r11d
+        mov     dword ptr [rsp - 80], ecx
+        mov     dword ptr [rsp - 112], eax
+        mov     dword ptr [rsp - 96], r12d
+        mov     dword ptr [rsp - 108], r15d
+        mov     dword ptr [rsp - 124], r8d
+        mov     dword ptr [rsp - 92], ebp
+        mov     dword ptr [rsp - 76], edi
+        mov     dword ptr [rsp - 88], ebx
+        mov     dword ptr [rsp - 104], r9d
+        mov     dword ptr [rsp - 72], r13d
+        mov     rax, qword ptr [rsp - 48]
+        mov     dword ptr [rsp - 120], eax
+        mov     dword ptr [rsp - 68], r14d
+        mov     dword ptr [rsp - 84], r10d
+        mov     rax, qword ptr [rsp - 56]
+        mov     dword ptr [rsp - 116], eax
+        mov     dword ptr [rsp - 100], esi
+        mov     rcx, qword ptr [rsp - 32]
+        movups  xmm0, [rcx]
+        movups  xmm1, [rcx + 16]
+        movups  xmm2, [rcx + 32]
+        paddd   xmm0, [rsp - 128]
+        movups  xmm3, [rcx + 48]
+        paddd   xmm1, [rsp + 16 - 128]
+        paddd   xmm2, [rsp + 32 - 128]
+        paddd   xmm3, [rsp + 48 - 128]
+        movups  [rcx], xmm0
+        movups  [rcx + 16], xmm1
+        movups  [rcx + 32], xmm2
+        movups  [rcx + 48], xmm3
+        add     rsp, 40
+        pop     rbx
+        pop     r12
+        pop     r13
+        pop     r14
+        pop     r15
+        pop     rbp
+end;
+{$else}
+procedure Salsa20x8(B: PCardinalArray); // old i386 version without SSE2
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        push    ebp
+        push    edi
+        push    esi
+        push    ebx
+        push    eax
+        sub     esp, 156
+        mov     ebx, eax
+        mov     eax, [ebx + 16]
+        mov     edi, [ebx + 36]
+        mov     ebp, [ebx + 24]
+        mov     edx, [ebx + 48]
+        mov     [esp + 24], eax
+        mov     eax, [ebx]
+        mov     [esp + 36], edi
+        mov     edi, [ebx + 20]
+        mov     [esp + 16], eax
+        mov     eax, [ebx + 4]
+        mov     [esp + 28], edi
+        mov     ecx, [ebx + 32]
+        mov     [esp + 20], eax
+        mov     eax, [ebx + 56]
+        mov     edi, [ebx + 52]
+        mov     [esp + 44], eax
+        mov     eax, [ebx + 40]
+        mov     [esp + 48], eax
+        mov     eax, [ebx + 8]
+        mov     [esp + 52], eax
+        mov     eax, [ebx + 12]
+        mov     [esp + 56], eax
+        mov     eax, [ebx + 60]
+        mov     byte ptr [esp + 76], 4
+        mov     [esp + 12], eax
+        mov     eax, [ebx + 44]
+        mov     [esp + 64], eax
+        mov     eax, [ebx + 28]
+        mov     [esp + 60], eax
+        mov     eax, ebp
+        mov     ebp, [esp + 28]
+{$ifdef FPC} align 8 {$else} {$ifdef HASALIGN} .align 8 {$endif}{$endif}
+@s:     mov     ebx, [esp + 16]
+        mov     esi, [esp + 24]
+        add     ebx, edx
+        rol     ebx, 7
+        xor     esi, ebx
+        mov     ebx, [esp + 16]
+        mov     [esp + 24], esi
+        add     ebx, esi
+        rol     ebx, 9
+        xor     ebx, ecx
+        lea     ecx, [esi + ebx]
+        mov     [esp + 28], ebx
+        rol     ecx, 13
+        mov     esi, ecx
+        mov     ecx, [esp + 20]
+        xor     esi, edx
+        lea     edx, [ebx + esi]
+        mov     ebx, [esp + 36]
+        mov     [esp + 32], esi
+        ror     edx, 14
+        xor     edx, [esp + 16]
+        mov     [esp + 16], edx
+        lea     edx, [ecx + ebp]
+        rol     edx, 7
+        xor     ebx, edx
+        lea     edx, [ebx + ebp]
+        mov     [esp + 36], ebx
+        rol     edx, 9
+        mov     ecx, edx
+        xor     ecx, edi
+        lea     esi, [ebx + ecx]
+        mov     [esp + 40], ecx
+        rol     esi, 13
+        xor     esi, [esp + 20]
+        lea     edx, [ecx + esi]
+        mov     ecx, [esp + 44]
+        ror     edx, 14
+        xor     edx, ebp
+        mov     ebp, [esp + 48]
+        mov     [esp + 68], edx
+        lea     edx, [ebp + 0 + eax]
+        rol     edx, 7
+        xor     ecx, edx
+        mov     edx, ebp
+        mov     edi, ecx
+        add     ecx, ebp
+        mov     ebp, [esp + 52]
+        rol     ecx, 9
+        mov     [esp + 44], edi
+        xor     ecx, ebp
+        mov     ebp, edi
+        add     ebp, ecx
+        rol     ebp, 13
+        xor     ebp, eax
+        lea     eax, [ecx + ebp]
+        mov     [esp + 48], ebp
+        mov     ebp, [esp + 64]
+        ror     eax, 14
+        xor     edx, eax
+        mov     [esp + 72], edx
+        mov     edx, [esp + 12]
+        lea     eax, [edx + ebp]
+        rol     eax, 7
+        xor     eax, [esp + 56]
+        add     edx, eax
+        rol     edx, 9
+        xor     edx, [esp + 60]
+        lea     ebx, [eax + edx]
+        rol     ebx, 13
+        xor     ebx, ebp
+        mov     ebp, [esp + 12]
+        lea     edi, [edx + ebx]
+        ror     edi, 14
+        xor     ebp, edi
+        mov     [esp + 12], ebp
+        mov     ebp, [esp + 16]
+        lea     edi, [ebp + 0 + eax]
+        rol     edi, 7
+        xor     edi, esi
+        lea     esi, [ebp + 0 + edi]
+        mov     [esp + 20], edi
+        rol     esi, 9
+        xor     esi, ecx
+        lea     ecx, [edi + esi]
+        mov     [esp + 52], esi
+        rol     ecx, 13
+        mov     edi, ecx
+        xor     edi, eax
+        lea     eax, [esi + edi]
+        mov     [esp + 56], edi
+        mov     edi, [esp + 24]
+        ror     eax, 14
+        xor     ebp, eax
+        mov     [esp + 16], ebp
+        mov     ebp, [esp + 68]
+        mov     esi, [esp + 72]
+        lea     eax, [edi + ebp]
+        rol     eax, 7
+        xor     eax, [esp + 48]
+        lea     ecx, [ebp + 0 + eax]
+        rol     ecx, 9
+        xor     ecx, edx
+        lea     edx, [eax + ecx]
+        mov     [esp + 60], ecx
+        rol     edx, 13
+        xor     edi, edx
+        lea     edx, [ecx + edi]
+        mov     [esp + 24], edi
+        mov     edi, [esp + 36]
+        ror     edx, 14
+        xor     ebp, edx
+        lea     edx, [edi + esi]
+        rol     edx, 7
+        xor     edx, ebx
+        mov     ebx, [esp + 12]
+        lea     ecx, [esi + edx]
+        mov     [esp + 64], edx
+        rol     ecx, 9
+        xor     ecx, [esp + 28]
+        lea     edx, [edx + ecx]
+        rol     edx, 13
+        xor     edi, edx
+        lea     edx, [ecx + edi]
+        mov     [esp + 36], edi
+        ror     edx, 14
+        xor     esi, edx
+        mov     [esp + 48], esi
+        mov     esi, [esp + 44]
+        lea     edx, [esi + ebx]
+        rol     edx, 7
+        xor     edx, [esp + 32]
+        lea     edi, [ebx + edx]
+        rol     edi, 9
+        xor     edi, [esp + 40]
+        lea     ebx, [edx + edi]
+        rol     ebx, 13
+        xor     esi, ebx
+        lea     ebx, [edi + esi]
+        mov     [esp + 44], esi
+        mov     esi, [esp + 12]
+        ror     ebx, 14
+        xor     esi, ebx
+        mov     [esp + 12], esi
+        dec     byte ptr [esp + 76]
+        jne     @s
+        mov     [esp + 28], ebp
+        mov     [esp + 104], eax
+        mov     eax, [esp + 20]
+        mov     [esp + 112], ecx
+        mov     [esp + 84], eax
+        mov     eax, [esp + 52]
+        mov     [esp + 132], edi
+        mov     [esp + 88], eax
+        mov     eax, [esp + 56]
+        mov     [esp + 128], edx
+        mov     [esp + 92], eax
+        mov     eax, [esp + 16]
+        mov     [esp + 80], eax
+        mov     eax, [esp + 60]
+        mov     [esp + 108], eax
+        mov     eax, [esp + 24]
+        mov     [esp + 96], eax
+        mov     eax, [esp + 28]
+        mov     [esp + 100], eax
+        mov     eax, [esp + 64]
+        mov     [esp + 124], eax
+        mov     eax, [esp + 36]
+        mov     [esp + 116], eax
+        mov     eax, [esp + 48]
+        mov     [esp + 120], eax
+        mov     eax, [esp + 44]
+        mov     [esp + 136], eax
+        mov     eax, [esp + 12]
+        mov     [esp + 140], eax
+        lea     edx, [esp + 80]
+        add     esp, 156
+        pop     ebx
+        xor     esi, esi
+        {$ifdef FPC} align 8 {$else} {$ifdef HASALIGN} .align 8 {$endif}{$endif}
+@1:     mov     eax, [edx + esi]
+        add     [ebx + esi], eax
+        add     esi, 4
+        cmp     esi, 64
+        jb      @1
+        pop     ebx
+        pop     esi
+        pop     edi
+        pop     ebp
+end;
+{$endif CPUX64}
+{$else}
+procedure Salsa20x8(B: PCardinalArray);
+var
+  x: TBlock512;
+  i: PtrUInt;
+begin // single B parameter keep the stack small and all offsets in [rsp+0..$7f]
+  x := PBlock512(B)^;
+  for i := 1 to 4 do
+  begin
+    x[4]  := x[4]  xor RolDWord(x[0]  + x[12], 7); // RoldDWord() intrinsic FPC
+    x[8]  := x[8]  xor RolDWord(x[4]  + x[0],  9);
+    x[12] := x[12] xor RolDWord(x[8]  + x[4],  13);
+    x[0]  := x[0]  xor RolDWord(x[12] + x[8],  18);
+    x[9]  := x[9]  xor RolDWord(x[5]  + x[1],  7);
+    x[13] := x[13] xor RolDWord(x[9]  + x[5],  9);
+    x[1]  := x[1]  xor RolDWord(x[13] + x[9],  13);
+    x[5]  := x[5]  xor RolDWord(x[1]  + x[13], 18);
+    x[14] := x[14] xor RolDWord(x[10] + x[6],  7);
+    x[2]  := x[2]  xor RolDWord(x[14] + x[10], 9);
+    x[6]  := x[6]  xor RolDWord(x[2]  + x[14], 13);
+    x[10] := x[10] xor RolDWord(x[6]  + x[2],  18);
+    x[3]  := x[3]  xor RolDWord(x[15] + x[11], 7);
+    x[7]  := x[7]  xor RolDWord(x[3]  + x[15], 9);
+    x[11] := x[11] xor RolDWord(x[7]  + x[3],  13);
+    x[15] := x[15] xor RolDWord(x[11] + x[7],  18);
+    x[1]  := x[1]  xor RolDWord(x[0]  + x[3],  7);
+    x[2]  := x[2]  xor RolDWord(x[1]  + x[0],  9);
+    x[3]  := x[3]  xor RolDWord(x[2]  + x[1],  13);
+    x[0]  := x[0]  xor RolDWord(x[3]  + x[2],  18);
+    x[6]  := x[6]  xor RolDWord(x[5]  + x[4],  7);
+    x[7]  := x[7]  xor RolDWord(x[6]  + x[5],  9);
+    x[4]  := x[4]  xor RolDWord(x[7]  + x[6],  13);
+    x[5]  := x[5]  xor RolDWord(x[4]  + x[7],  18);
+    x[11] := x[11] xor RolDWord(x[10] + x[9],  7);
+    x[8]  := x[8]  xor RolDWord(x[11] + x[10], 9);
+    x[9]  := x[9]  xor RolDWord(x[8]  + x[11], 13);
+    x[10] := x[10] xor RolDWord(x[9]  + x[8],  18);
+    x[12] := x[12] xor RolDWord(x[15] + x[14], 7);
+    x[13] := x[13] xor RolDWord(x[12] + x[15], 9);
+    x[14] := x[14] xor RolDWord(x[13] + x[12], 13);
+    x[15] := x[15] xor RolDWord(x[14] + x[13], 18);
+  end;
+  for i := 0 to 15 do
+    inc(B[i], x[i]);
+end;
+{$endif CPUINTEL}
+
+{$ifdef CPUSSE2}
+
+// our SSE2 optimized version for i386 and x86_64 - faster than OpenSSL
 {
    Default layout:     SSE2 layout:
      0  1  2  3         0  5 10 15
@@ -1904,7 +2404,7 @@ end;
      8  9 10 11         8 13  2  7
     12 13 14 15         4  9 14  3
 }
-procedure PrepareSse2(blocks: PCardinalArray; count: cardinal); overload;
+procedure SPrepareSse2(blocks: PCardinalArray; count: cardinal);
 var
   c: cardinal;
 begin
@@ -1920,26 +2420,8 @@ begin
   until count = 0;
 end;
 
-procedure PrepareSse2(dst, src: PCardinalArray; count: cardinal); overload;
-begin
-  repeat
-    dst[1] := src[5];  dst[5]  := src[1];
-    dst[2] := src[10]; dst[10] := src[2];
-    dst[3] := src[15]; dst[15] := src[3];
-    dst[4] := src[12]; dst[12] := src[4];
-    dst[7] := src[11]; dst[11] := src[7];
-    dst[9] := src[13]; dst[13] := src[9];
-    src := @src[16];
-    dst := @dst[16];
-    dec(count);
-  until count = 0;
-end;
-
-{$ifdef FPC}
-  {$WARN 7122 off : Check size of memory operand }
-{$endif FPC}
-
-procedure BlockMix(dst, src, bxor: pointer; R: PtrUInt);
+{$ifdef CPUX64}
+procedure SBlockMix(dst, src, bxor: pointer; R: PtrUInt);
 {$ifdef FPC} assembler; nostackframe; asm {$else} asm .noframe {$endif}
         // rcx/rdi=dst rdx/rsi=src r8/rdx=BXor r9/rcx=R
         {$ifdef WIN64ABI}
@@ -1951,14 +2433,13 @@ procedure BlockMix(dst, src, bxor: pointer; R: PtrUInt);
         mov     rcx, r9
         {$endif WIN64ABI}
         shl     rcx, 7
-        lea     r9, [rcx - 40H]
-        lea     rax, [rsi + r9]
-        lea     r9, [rdx + r9]
-        and     rdx, rdx
-        movdqa  xmm0, [rax]
-        movdqa  xmm1, [rax + 10H]
-        movdqa  xmm2, [rax + 20H]
-        movdqa  xmm3, [rax + 30H]
+        lea     rax, [rsi + rcx - 40H]
+        lea     r9,  [rdx + rcx - 40H]
+        movaps  xmm0, [rax]
+        movaps  xmm1, [rax + 10H]
+        movaps  xmm2, [rax + 20H]
+        movaps  xmm3, [rax + 30H]
+        test    rdx, rdx
         jz      @no1
         pxor    xmm0, [r9]
         pxor    xmm1, [r9 + 10H]
@@ -1967,80 +2448,80 @@ procedure BlockMix(dst, src, bxor: pointer; R: PtrUInt);
 @no1:   xor     r9, r9
         xor     r8, r8
 {$ifdef FPC} align 8 {$else} .align 8 {$endif}
-@loop:  and     rdx, rdx
-        pxor    xmm0, [rsi + r9]
+@loop:  pxor    xmm0, [rsi + r9]
         pxor    xmm1, [rsi + r9 + 10H]
         pxor    xmm2, [rsi + r9 + 20H]
         pxor    xmm3, [rsi + r9 + 30H]
+        test     rdx, rdx
         jz      @no2
         pxor    xmm0, [rdx + r9]
         pxor    xmm1, [rdx + r9 + 10H]
         pxor    xmm2, [rdx + r9 + 20H]
         pxor    xmm3, [rdx + r9 + 30H]
-@no2:   movdqa  xmm8, xmm0
-        movdqa  xmm9, xmm1
-        movdqa  xmm10, xmm2
-        movdqa  xmm11, xmm3
+@no2:   movaps  xmm8, xmm0
+        movaps  xmm9, xmm1
+        movaps  xmm10, xmm2
+        movaps  xmm11, xmm3
         mov     rax, 8
 {$ifdef FPC} align 8 {$else} .align 8 {$endif}
-@s:     movdqa  xmm4, xmm1
+@s:     movaps  xmm4, xmm1
         paddd   xmm4, xmm0
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 7
         psrld   xmm5, 25
         pxor    xmm3, xmm4
-        movdqa  xmm4, xmm0
+        movaps  xmm4, xmm0
         pxor    xmm3, xmm5
         paddd   xmm4, xmm3
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 9
         psrld   xmm5, 23
         pxor    xmm2, xmm4
-        movdqa  xmm4, xmm3
+        movaps  xmm4, xmm3
         pxor    xmm2, xmm5
         pshufd  xmm3, xmm3, 93H
         paddd   xmm4, xmm2
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 13
         psrld   xmm5, 19
         pxor    xmm1, xmm4
-        movdqa  xmm4, xmm2
+        movaps  xmm4, xmm2
         pxor    xmm1, xmm5
         pshufd  xmm2, xmm2, 4EH
         paddd   xmm4, xmm1
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 18
         psrld   xmm5, 14
         pxor    xmm0, xmm4
-        movdqa  xmm4, xmm3
+        movaps  xmm4, xmm3
         pxor    xmm0, xmm5
         pshufd  xmm1, xmm1, 39H
         paddd   xmm4, xmm0
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 7
         psrld   xmm5, 25
         pxor    xmm1, xmm4
-        movdqa  xmm4, xmm0
+        movaps  xmm4, xmm0
         pxor    xmm1, xmm5
         paddd   xmm4, xmm1
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 9
         psrld   xmm5, 23
         pxor    xmm2, xmm4
-        movdqa  xmm4, xmm1
+        movaps  xmm4, xmm1
         pxor    xmm2, xmm5
         pshufd  xmm1, xmm1, 93H
         paddd   xmm4, xmm2
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 13
         psrld   xmm5, 19
         pxor    xmm3, xmm4
-        movdqa  xmm4, xmm2
+        movaps  xmm4, xmm2
         pxor    xmm3, xmm5
         pshufd  xmm2, xmm2, 4EH
         paddd   xmm4, xmm3
         sub     rax, 2
-        movdqa  xmm5, xmm4
+        movaps  xmm5, xmm4
         pslld   xmm4, 18
         psrld   xmm5, 14
         pxor    xmm0, xmm4
@@ -2058,10 +2539,10 @@ procedure BlockMix(dst, src, bxor: pointer; R: PtrUInt);
         shr     rax, 1
         add     rax, rdi
         cmp     r9, rcx
-        movdqa  [rax], xmm0
-        movdqa  [rax + 10H], xmm1
-        movdqa  [rax + 20H], xmm2
-        movdqa  [rax + 30H], xmm3
+        movaps  [rax], xmm0
+        movaps  [rax + 10H], xmm1
+        movaps  [rax + 20H], xmm2
+        movaps  [rax + 30H], xmm3
         jne     @loop
         {$ifdef WIN64ABI}
         pop     rdi
@@ -2069,36 +2550,171 @@ procedure BlockMix(dst, src, bxor: pointer; R: PtrUInt);
         {$endif WIN64ABI}
 end;
 
+{$else}
+procedure SBlockMix(dst, src, bxor: pointer; R: PtrUInt);
+var
+  s2, s3: THash128; // temporary storage (no xmm8 and xmm9 on 32-bit)
+asm
+        // eax=dst edx=src ecx=bxor stack=R
+        push    ebx
+        push    esi
+        push    edi
+        mov     ebx, R
+        mov     edi, eax
+        mov     esi, edx
+        mov     R, ecx
+        // edi=dst esi=src R=BXor ebx=R
+        shl     ebx, 7
+        test    ecx, ecx
+        lea     eax,  [esi + ebx - 40H]
+        lea     ecx,  [ecx + ebx - 40H]
+        movaps  xmm0, [eax]
+        movaps  xmm1, [eax + 10H]
+        movaps  xmm2, [eax + 20H]
+        movaps  xmm3, [eax + 30H]
+        jz      @no1
+        pxor    xmm0, [ecx]
+        pxor    xmm1, [ecx + 10H]
+        pxor    xmm2, [ecx + 20H]
+        pxor    xmm3, [ecx + 30H]
+@no1:   xor     ecx, ecx
+        xor     edx, edx
+{$ifdef FPC} align 8 {$endif}
+@loop:  mov     eax, R
+        pxor    xmm0, [esi + ecx]
+        pxor    xmm1, [esi + ecx + 10H]
+        pxor    xmm2, [esi + ecx + 20H]
+        pxor    xmm3, [esi + ecx + 30H]
+        test    eax, eax
+        jz      @no2
+        pxor    xmm0, [eax + ecx]
+        pxor    xmm1, [eax + ecx + 10H]
+        pxor    xmm2, [eax + ecx + 20H]
+        pxor    xmm3, [eax + ecx + 30H]
+@no2:   movaps  xmm6, xmm0
+        movaps  xmm7, xmm1
+        movups  s2, xmm2
+        movups  s3, xmm3
+        mov     eax, 8
+{$ifdef FPC} align 8 {$endif}
+@s:     movaps  xmm4, xmm1
+        paddd   xmm4, xmm0
+        movaps  xmm5, xmm4
+        pslld   xmm4, 7
+        psrld   xmm5, 25
+        pxor    xmm3, xmm4
+        movaps  xmm4, xmm0
+        pxor    xmm3, xmm5
+        paddd   xmm4, xmm3
+        movaps  xmm5, xmm4
+        pslld   xmm4, 9
+        psrld   xmm5, 23
+        pxor    xmm2, xmm4
+        movaps  xmm4, xmm3
+        pxor    xmm2, xmm5
+        pshufd  xmm3, xmm3, 93H
+        paddd   xmm4, xmm2
+        movaps  xmm5, xmm4
+        pslld   xmm4, 13
+        psrld   xmm5, 19
+        pxor    xmm1, xmm4
+        movaps  xmm4, xmm2
+        pxor    xmm1, xmm5
+        pshufd  xmm2, xmm2, 4EH
+        paddd   xmm4, xmm1
+        movaps  xmm5, xmm4
+        pslld   xmm4, 18
+        psrld   xmm5, 14
+        pxor    xmm0, xmm4
+        movaps  xmm4, xmm3
+        pxor    xmm0, xmm5
+        pshufd  xmm1, xmm1, 39H
+        paddd   xmm4, xmm0
+        movaps  xmm5, xmm4
+        pslld   xmm4, 7
+        psrld   xmm5, 25
+        pxor    xmm1, xmm4
+        movaps  xmm4, xmm0
+        pxor    xmm1, xmm5
+        paddd   xmm4, xmm1
+        movaps  xmm5, xmm4
+        pslld   xmm4, 9
+        psrld   xmm5, 23
+        pxor    xmm2, xmm4
+        movaps  xmm4, xmm1
+        pxor    xmm2, xmm5
+        pshufd  xmm1, xmm1, 93H
+        paddd   xmm4, xmm2
+        movaps  xmm5, xmm4
+        pslld   xmm4, 13
+        psrld   xmm5, 19
+        pxor    xmm3, xmm4
+        movaps  xmm4, xmm2
+        pxor    xmm3, xmm5
+        pshufd  xmm2, xmm2, 4EH
+        paddd   xmm4, xmm3
+        sub     eax, 2
+        movaps  xmm5, xmm4
+        pslld   xmm4, 18
+        psrld   xmm5, 14
+        pxor    xmm0, xmm4
+        pshufd  xmm3, xmm3, 39H
+        pxor    xmm0, xmm5
+        ja      @s
+        movups  xmm4, s2
+        movups  xmm5, s3
+        paddd   xmm0, xmm6
+        paddd   xmm1, xmm7
+        paddd   xmm2, xmm4
+        paddd   xmm3, xmm5
+        lea     eax, [edx + ecx]
+        xor     edx, ebx
+        and     eax, -128
+        add     ecx, 64
+        shr     eax, 1
+        add     eax, edi
+        cmp     ecx, ebx
+        movups  [eax], xmm0
+        movups  [eax + 10H], xmm1
+        movups  [eax + 20H], xmm2
+        movups  [eax + 30H], xmm3
+        jne     @loop
+        pop     edi
+        pop     esi
+        pop     ebx
+end;
+{$endif CPUX64}
+
 procedure SMix(R, N: PtrUInt; X, Y, V: PCardinalArray);
 var
   i, j, R128: PtrUInt;
-  b: PByte;
+  b: PByteArray;
 begin
   R128 := R * 128;
-  PrepareSse2(X, R * 2);
+  SPrepareSse2(X, R * 2);
   b := pointer(V);
   MoveFast(X^, b^, R128);
   i := 0;
   repeat
-    BlockMix(@b[R128], b, nil, R);
+    SBlockMix(@b[R128], b, nil, R);
     b := @b[R128];
     inc(i);
   until i = N - 1;
-  BlockMix(X, b, nil, R);
+  SBlockMix(X, b, nil, R);
   i := 0;
   repeat
     j := (X[(R * 2 - 1) * 16] and (N - 1));
-    BlockMix(Y, X, @V[j * R * 32], R);
+    SBlockMix(Y, X, @V[j * R * 32], R);
     j := (Y[(R * 2 - 1) * 16] and (N - 1));
-    BlockMix(X, Y, @V[j * R * 32], R);
+    SBlockMix(X, Y, @V[j * R * 32], R);
     inc(i, 2);
   until i = N;
-  PrepareSse2(X, R * 2);
+  SPrepareSse2(X, R * 2);
 end;
 
 {$else}
 
-procedure BlockMix(Input, Output: PByteArray; R: PtrUInt);
+procedure SBlockMix(Input, Output: PByteArray; R: PtrUInt);
 var
   i: PtrUInt;
   tmp: THash512;
@@ -2124,25 +2740,25 @@ begin
   i := 0;
   repeat
     MoveFast(X^, V[i * R32], R32 * 4);
-    BlockMix(pointer(X), pointer(Y), R);
+    SBlockMix(pointer(X), pointer(Y), R);
     inc(i);
     MoveFast(Y^, V[i * R32], R32 * 4);
-    BlockMix(pointer(Y), pointer(X), R);
+    SBlockMix(pointer(Y), pointer(X), R);
     inc(i);
   until i >= N;
   i := 0;
   repeat
     j := (X[(R * 2 - 1) * 16] and (N - 1));
     XorMemory(pointer(X), @V[j * R32], R32 * 4);
-    BlockMix(pointer(X), pointer(Y), R);
+    SBlockMix(pointer(X), pointer(Y), R);
     j := (Y[(R * 2 - 1) * 16] and (N - 1));
     XorMemory(pointer(Y), @V[j * R32], R32 * 4);
-    BlockMix(pointer(Y), pointer(X), R);
+    SBlockMix(pointer(Y), pointer(X), R);
     inc(i, 2);
   until i >= N;
 end;
 
-{$endif CPUX64}
+{$endif CPUSSE2}
 
 function SCryptMemoryUse(N, R, P: QWord): QWord;
 begin
@@ -2152,24 +2768,22 @@ end;
 function RawSCrypt(const Password: RawUtf8; const Salt: RawByteString;
   N, R, P, DestLen: PtrUInt): RawByteString;
 var
-  workmem: QWord;
   R128: PtrUInt;
   data: RawByteString;
-  X: PByteArray; // allocated X[R*128] Y[R*128] V[N*R*128]
+  XY, V: PByteArray; // allocate X[R*128] Y[R*128] and V[N*R*128]
   d: pointer;
 begin
   result := '';
   // validate parameters
   R128 := R * 128;
-  workmem := QWord(R128) * ({X+Y=}2 + {Y=}N);
   if (DestLen < 16) or
      (N <= 1) or
      (N >= PtrUInt(1 shl 31)) or
-     (not IsPowerOfTwo(N)) or     // must be a power of 2 greater than 1
-     (R = 0) or                   // R = blocksize
-     (P = 0) or                   // P = parallel
-     (workmem >= 1 shl 30) or     // consume up to 1GB of RAM
-     (R * P >= 1 shl 30) or       // must satisfy r * p < 2^30
+     (not IsPowerOfTwo(N)) or               // must be > 1 and power of 2
+     (R = 0) or                             // R = blocksize
+     (P = 0) or                             // P = parallel
+     (QWord(R128) * N > QWord(2) shl 30) or // allow up to 2GB of RAM for V
+     (R * P >= 1 shl 30) or                 // must satisfy r * p < 2^30
      (R > (MaxInt shr 8)) or
      (N > ((MaxInt shr 7) div R)) then
     exit;
@@ -2177,18 +2791,20 @@ begin
   data := Pbkdf2HmacSha256(Password, Salt, 1, P * R128);
   if data = '' then
     exit;
-  X := GetMemAligned(workmem); // allocate all mem at once
+  XY := GetMemAligned(R128 * 2); // contiguous X,Y allocation (a few KB)
+  V  := GetMemAligned(R128 * N); // keep huge V as a power of two for OS call
   try
     d := pointer(data);
     repeat // no parallel execution yet
-      MoveFast(d^, X[0], R128);
-      SMix(R, N, @X[0], @X[R128], @X[R128 * 2]);
-      MoveFast(X[0], d^, R128);
+      MoveFast(d^, XY[0], R128);
+      SMix(R, N, @XY[0], @XY[R128], @V[0]);
+      MoveFast(XY[0], d^, R128);
       inc(PByte(d), R128);
       dec(P);
     until P = 0;
   finally
-    FreeMemAligned(X, workmem);
+    FreeMemAligned(XY, R128 * 2); // 16-byte aligned for SSE2 movaps access
+    FreeMemAligned(V, R128 * N);
   end;
   result := Pbkdf2HmacSha256(Password, data, 1, DestLen);
 end;
@@ -2200,8 +2816,10 @@ begin
   assert(SizeOf(TAesFullHeader) = SizeOf(TAesBlock));
   {$endif PUREMORMOT2}
   BCrypt := @BCryptHash; // to implement mcfBCrypt in mormot.crypt.secure
-  if not Assigned(SCrypt) then
-    SCrypt := @RawSCrypt; // if faster OpenSSL is not already set
+  {$ifndef CPUSSE2} // our SSE2 code above is faster than OpenSSL :)
+  if not Assigned(SCrypt) then // if OpenSSL is not already set
+  {$endif CPUSSE2}
+    SCrypt := @RawSCrypt;
 end;
 
 initialization

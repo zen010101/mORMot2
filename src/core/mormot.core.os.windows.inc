@@ -331,6 +331,16 @@ begin
   result := fCurrentDir + fn;
 end;
 
+function SetDllDirectoryW(lpPathName: PWideChar): BOOL; // affects LoadLibrary()
+  stdcall; external kernel32; // XP SP1+
+
+function LibrarySetDirectory(const Folder: TFileName): boolean;
+var
+  tmp: TW32Temp;
+begin
+  result := SetDllDirectoryW(W32(Folder, tmp));
+end;
+
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
 var
   tmp: TW32Temp;
@@ -546,7 +556,7 @@ begin
             (StdOut <> INVALID_HANDLE_VALUE);
 end;
 
-procedure AllocConsole;
+procedure WinAllocConsole;
 begin
   ConsoleOutputCP := 0; // reset to force calling GetConsoleOutputCP() again
   Windows.AllocConsole;
@@ -2662,41 +2672,60 @@ begin
   ConsoleHandleCtrlCPressed := true;
 end;
 
-procedure ConsoleWaitForEnterKey;
+function WinWaitFor(ms: cardinal; h: THandle; checkSubThreadQuit: boolean): TWinWaitFor;
 var
+  mainthread: boolean;
   msg: TMsg;
+begin
+  mainthread := (GetCurrentThreadID = MainThreadID);
+  // first process Windows messages (if needed)
+  result := wwfQuit;
+  if mainthread then // same logic than Application.ProcessMessages
+    while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
+      if msg.Message = WM_QUIT then
+        exit // always stop waiting when the process is gracefully closing
+      else
+      begin
+        TranslateMessage(msg);
+        DispatchMessage(msg);
+      end
+  else if checkSubThreadQuit then // e.g. from ConsoleWaitForEnterKey
+    while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
+      if msg.Message = WM_QUIT then
+        exit;
+  // proper Sleep/WaitForSingleObject call
+  mainthread := mainthread and IsMultiThread;
+  if h = 0 then
+  begin
+    if mainthread then
+      CheckSynchronize(ms) // call any Synchronize() event at full speed
+    else
+      Windows.Sleep(ms);
+    result := wwfTimeout;
+    exit;
+  end;
+  if mainthread then
+    CheckSynchronize(0);
+  case WaitForSingleObject(h, ms) of
+    WAIT_TIMEOUT:
+      result := wwfTimeout;
+    WAIT_OBJECT_0:
+      result := wwfSignaled;
+  else
+    result := wwfFailed;
+  end;
+  if mainthread then
+    CheckSynchronize(0);
+end;
+
+procedure ConsoleWaitForEnterKey;
 begin
   ConsoleHandleCtrlCPressed := false;
   HandleCtrlC(TConsoleHandleCtrlC.HandleCtrlC);
   try
-    if GetCurrentThreadID = MainThreadID then
-      // process the messages from the main thread while waiting
-      while not ConsoleKeyPressed(VK_RETURN) and
-            not ConsoleHandleCtrlCPressed do
-      begin
-        if IsMultiThread then
-          CheckSynchronize(100)
-        else
-          Windows.Sleep(100);
-        while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
-          if msg.Message = WM_QUIT then
-            exit // stop waiting when the process is gracefully closing
-          else
-          begin
-            TranslateMessage(msg);
-            DispatchMessage(msg);
-          end;
-      end
-    else
-      // just intercept any WM_QUIT message on this sub-thread
-      while not ConsoleKeyPressed(VK_RETURN) and
-            not ConsoleHandleCtrlCPressed do
-      begin
-        Windows.Sleep(100);
-        if PeekMessage(msg, 0, 0, 0, PM_REMOVE) then
-          if msg.Message = WM_QUIT then
-            exit; // nothing to dispatch with PostThreadMessage()
-      end;
+    while (WinWaitFor({ms=}100, {handle=}0, {wm_quit=}true) = wwfTimeout) and
+          not ConsoleKeyPressed(VK_RETURN) and
+          not ConsoleHandleCtrlCPressed do ;
   finally
     HandleCtrlC(nil);
   end;
@@ -3435,8 +3464,9 @@ begin
   inherited Create;
   if Path = '' then
   begin
-    TService.DoLog(sllError,
-      'CreateNewService(''%'',''%'') with no Path', [Name, DisplayName], self);
+    if Assigned(WindowsServiceLog) then
+      TService.DoLog(sllError, 'CreateNewService(''%'',''%'') with no Path',
+        [Name, DisplayName], self);
     exit;
   end;
   if TargetComputer = '' then
@@ -3481,8 +3511,9 @@ begin
   t5.Done;
   if fHandle = 0 then
     RaiseLastError('TServiceController.CreateService:', EService);
-  TService.DoLog(sllInfo, 
-    'CreateService(''%'',''%'',''%'')', [Name, DisplayName, exeName], self);
+  if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllInfo, 'CreateService(''%'',''%'',''%'')',
+      [Name, DisplayName, exeName], self);
 end;
 
 constructor TServiceController.CreateOpenService(
@@ -3538,7 +3569,8 @@ begin
     result := ssNotInstalled
   else
     result := CurrentStateToServiceState(GetStatus.dwCurrentState);
-  TService.DoLog(sllTrace, 'GetState(%)=%', [fName, ToText(result)^], self);
+  if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllTrace, 'GetState(%)=%', [fName, ToText(result)^], self);
 end;
 
 function TServiceController.GetStatus: TServiceStatus;
@@ -4057,7 +4089,7 @@ begin
         end;
       end
       else
-        TService.DoLog(sllLastError, 'GetServicePid(%)', [aServiceName], nil);
+        TService.DoLog(sllLastError, 'GetServicePid(%)', [aServiceName]);
     finally
       CloseServiceHandle(svc);
     end
@@ -4146,17 +4178,17 @@ end;
 function CancelProcess(pid: cardinal; waitseconds: integer): boolean;
 begin
   result := false;
-  if integer(pid) <= 0 then
+  if (integer(pid) <= 0) or
+     (GetConsoleWindow <> 0) or
+     not AttachConsole(pid) then
     exit;
-  if GetConsoleWindow <> 0 then              // can attach to a single console
-    FreeConsole;
-  if not AttachConsole(pid) then             // attach to the pid console
-    exit;
+  // we are now attached to the pid console
   SetConsoleCtrlHandler(nil, true);          // nil=ignore the event ourself
   GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0); // send Ctrl+C event
   FreeConsole;                               // detach
   SetConsoleCtrlHandler(nil, false);         // remove our nil=ignore handler
-  result := WaitProcess(pid, waitseconds);
+  result := (waitseconds = 0) or
+            WaitProcess(pid, waitseconds);
 end;
 
 function QuitProcess(pid: cardinal; waitseconds: integer): boolean;
@@ -4309,10 +4341,12 @@ function CreateProcessW(lpApplicationName: PWideChar; lpCommandLine: PWideChar;
 function GetExitCodeProcess(hProcess: THandle; out lpExitCode: cardinal): BOOL;
   stdcall; external kernel32;
 
-function CreateJobToClose(parentpid: cardinal): THandle;
+function CreateJobToClose(parentpid: cardinal; const ctxt: ShortString;
+   allowSilentBreakaway: boolean): THandle;
 var
   security: TSecurityAttributes;
   limits: TJobObjectExtendedLimitInformation;
+  flags: cardinal;
   jobname: RawUtf8;
 begin
   security.nLength := SizeOf(security);
@@ -4321,28 +4355,38 @@ begin
   _fmt('AutoCloseChild%d', [parentpid], jobname);
   result := CreateJobObjectA(@security, pointer(jobname));
   if result = 0 then
+  begin
+    if Assigned(WindowsServiceLog) then
+      TService.DoLog(sllLastError, '%: CreateJobObjectA(%)', [ctxt, jobname]);
     exit;
+  end;
   FillCharFast(limits, SizeOf(limits), 0);
-  limits.BasicLimitInformation.LimitFlags :=
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE or
-    JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  flags := JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE or JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  if allowSilentBreakaway then // relaxed for children (e.g. ServiceUI.exe)
+    flags := flags or JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+  limits.BasicLimitInformation.LimitFlags := flags;
   if SetInformationJobObject(result, ExtendedLimitInformation,
        @limits, SizeOf(limits)) then
-    exit;
+  begin
+    if Assigned(WindowsServiceLog) then
+      TService.DoLog(sllTrace, '%: SetInformationJobObject(%) success',
+        [ctxt, jobname]);
+    exit; // success
+  end;
+  if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllLastError, '%: SetInformationJobObject(%)',
+      [ctxt, jobname]);
   CloseHandle(result); // error initializing the job (too old or too new OS?)
   result := 0;
 end;
 
 function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boolean;
 begin
-  result := (job <> 0) and
-            AssignProcessToJobObject(job, process);
-  if result then
-    TService.DoLog(sllTrace, 'RunCommand: % AssignProcessToJobObject success',
-      [ctxt], nil)
-  else
-    TService.DoLog(sllDebug, 'RunCommand: % AssignProcessToJobObject failed as %',
-      [ctxt, WinErrorShort(GetLastError)], nil);
+  result := AssignProcessToJobObject(job, process);
+  if not result then
+    TService.DoLog(sllLastError, '%: AssignProcessToJobObject', [ctxt])
+  else if Assigned(WindowsServiceLog) then
+    TService.DoLog(sllTrace, '%: AssignProcessToJobObject success', [ctxt]);
 end;
 
 function RunProcess(const path, arg1: TFileName; waitfor: boolean;
@@ -4374,57 +4418,88 @@ begin
 end;
 
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
-  options: TRunOptions; waitfordelayms: cardinal; processhandle: PHandle;
-  redirected: PRawByteString; const onoutput: TOnRedirect;
-  const wrkdir: TFileName): integer;
+  options: TRunOptions; processhandle: PHandle): integer;
 var
   processinfo: TProcessInformation;
 begin
-  result := RunCommandWin(cmd, waitfor, processinfo, env, options,
-    waitfordelayms, redirected, onoutput, wrkdir);
+  result := RunCommandWin(cmd, waitfor, processinfo, env, options);
   if processhandle <> nil then
     processhandle^ := processinfo.hProcess;
 end;
 
+function RunRedirect(const cmd: TFileName; exitcode: PInteger;
+  const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
+  const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
+var
+  res: integer;
+  redir: PRawByteString;
+  processinfo: TProcessInformation;
+begin
+  result := '';
+  redir := nil; // if onoutput is enough (e.g. to avoid huge result)
+  if setresult then
+    redir := @result;
+  res := RunCommandWin(cmd, {wait=}true, processinfo, env, options,
+    waitfordelayms, redir, onoutput, wrkdir);
+  if exitcode <> nil then
+    exitcode^ := res;
+end;
+
 function RunCommandWin(const cmd: TFileName; waitfor: boolean;
-  var processinfo: TProcessInformation; const env: TFileName;
+  var processinfo: TWinProcessInfo; const env: TFileName;
   options: TRunOptions; waitfordelayms: cardinal;
   redirected: PRawByteString; const onoutput: TOnRedirect;
   const wrkdir: TFileName; jobtoclose: PHandle): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
-  security: TSecurityAttributes;
+  procsec, pipesec: TSecurityAttributes;
   exe, path: TFileName;
   rd, wr, job: THandle;
   // CreateProcess can alter the strings -> use local SynUnicode temp variables
   wcmd, wenv, wpath: SynUnicode;
   endtix: Int64;
-  flags, exitcode, err, res: cardinal;
+  flags, exitcode: cardinal;
   ram: TRunAbortMethods;
-  created, terminated: boolean;
+  created: boolean;
   i, l: PtrInt;
 
-  procedure RedirectOutput(flush: boolean);
+  procedure ReturnLastError(const Api: ShortString; ctxt: cardinal);
+  var
+    err: cardinal;
+  begin
+    err := GetLastError;
+    TService.DoLog(sllDebug, 'RunCommand: % = % (ctxt=%)',
+      [Api, WinErrorShort(err), Int64(ctxt)]);
+    result := -err; // returns OS API error as negative number
+  end;
+
+  function RedirectOutputAborted(killed: boolean): boolean;
   var
     new: RawByteString;
     pending, n: cardinal;
     tmp: TBuffer4K;
   begin
+    result := false;
+    if rd = 0 then
+      exit;
     repeat
       pending := 0;
       if not PeekNamedPipe(rd, nil, 0, nil, @pending, nil) or
-         (pending = 0) then
+         (pending = 0) then // idle
       begin
-        if (not flush) and
-           Assigned(onoutput) and
-           onoutput('', processinfo.dwProcessId) then
-            exitcode := WAIT_OBJECT_0; // onoutput() returned true to abort
+        if Assigned(onoutput) then
+          result := onoutput('', processinfo.dwProcessId); // true = aborted
         break;
       end;
       if pending > SizeOf(tmp) then
         pending := SizeOf(tmp);
       n := 0;
-      Win32Check(ReadFile(rd, tmp, pending, n, nil));
+      if not ReadFile(rd, tmp, pending, n, nil) then
+      begin
+        ReturnLastError('ReadFile', pending);
+        result := true; // abort
+        exit;
+      end;
       if n <= 0 then
         break;
       if redirected <> nil then
@@ -4433,18 +4508,79 @@ var
         MoveFast(tmp, PByteArray(redirected^)[l], n); // append without convert
         inc(l, n);
       end;
-      if Assigned(onoutput) then
+      if Assigned(onoutput) and
+         not result then
       begin
-        SetString(new, PAnsiChar(@tmp), n);
+        FastSetRawByteString(new, @tmp, n);
         if onoutput(new, processinfo.dwProcessId) then // notify new content
-          // onoutput() callback returned true to stop the execution
-          if not flush then
-          begin
-            exitcode := WAIT_OBJECT_0;
+        begin
+          result := true; // onoutput() returned true to abort
+          if not killed then
             break;
-          end;
+        end;
       end;
     until false;
+  end;
+
+  function RedirectAndWait(endtix: Int64): boolean;
+  begin
+    repeat
+      // note: WaitForMultipleObjects() with rd burns 100% of one core :(
+      case WinWaitFor({ms=}50, processinfo.hProcess) of
+        wwfSignaled:
+          break;
+        wwfFailed, wwfQuit:
+          begin
+            ReturnLastError('RedirectAndWait abort', processinfo.dwProcessId);
+            result := false;
+            exit;
+          end;
+      end;
+    until RedirectOutputAborted({killed=}false) or
+          ((endtix <> 0) and
+           (GetTickCount64 > endtix));
+    result := true;
+  end;
+
+  procedure AbortProcess;
+  var
+    terminated: boolean;
+
+  begin
+    // it is time to gracefully or force process ending
+    if RunAbortTimeoutSecs > 0 then
+    begin
+      endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000;
+      terminated := false;
+      if ramCtrlC in ram then
+      begin
+        // try Ctrl+C (if not disabled above)
+        terminated := CancelProcess(processinfo.dwProcessId, {wait=}0) and
+                      RedirectAndWait(endtix);
+        TService.DoLog(sllTrace, 'RunCommand: CancelProcess(pid=%)=%',
+          [processinfo.dwProcessId, ord(terminated)]);
+      end;
+      if (ramQuit in ram) and
+         not terminated then
+      begin
+        // try WM_QUIT
+        terminated := QuitProcess(processinfo.dwProcessId, {wait=}0) and
+                      RedirectAndWait(endtix);
+        TService.DoLog(sllTrace, 'RunCommand: QuitProcess(%)=%',
+          [processinfo.dwProcessId, ord(terminated)]);
+      end;
+      if GetExitCodeProcess(processinfo.hProcess, exitcode) then
+        result := exitcode
+      else
+        ReturnLastError('GetExitCodeProcess(soft)', processinfo.dwProcessId)
+    end;
+    if exitcode <> STILL_ACTIVE then
+      exit;
+    // soft ending via Ctrl+C or WM_QUIT was not enough: hard kill
+    result := 255;
+    terminated := TerminateProcess(processinfo.hProcess, result);
+    TService.DoLog(sllTrace, 'RunCommand: TerminateProcess(%)=%',
+      [processinfo.dwProcessId, ord(terminated)]);
   end;
 
 begin
@@ -4477,9 +4613,9 @@ begin
   if (path = '') and
      FileExists(Executable.ProgramFilePath + exe) then
     path := Executable.ProgramFilePath; // prefers the current folder
-  // prepare the CreateProcess arguments
+  // prepare the main CreateProcessW arguments
   wcmd := SynUnicode(cmd);
-  UniqueString(wcmd);
+  UniqueString(wcmd); // CreateProcessW() modifies wcmd buffer in-place
   wpath := SynUnicode(path);
   if env <> '' then
   begin
@@ -4493,22 +4629,26 @@ begin
     else
       UniqueString(wenv);
   end;
-  security.nLength := SizeOf(security);
-  security.bInheritHandle := true;
-  security.lpSecurityDescriptor := nil;
-  // launch the process
+  // prepare redirection and execution context
+  FillCharFast(procsec, SizeOf(procsec), 0);
+  procsec.nLength := SizeOf(procsec);
   FillCharFast(startupinfo, SizeOf(startupinfo), 0);
   startupinfo.cb := SizeOf(startupinfo);
-  ram := RunAbortMethods;
   l := 0;
   rd := 0;
   job := 0;
   if Assigned(jobtoclose) then
     jobtoclose^ := job;
+  ram := RunAbortMethods; // local copy to exclude ramCtrlC
   if Assigned(onoutput) or
      (redirected <> nil) then
-    if CreatePipe(rd, wr, @security, 0) then
+  begin
+    FillCharFast(pipesec, SizeOf(pipesec), 0);
+    pipesec.nLength := SizeOf(pipesec);
+    pipesec.bInheritHandle := true;
+    if CreatePipe(rd, wr, @pipesec, 0) then
     begin
+      procsec.bInheritHandle := true;
       SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
       startupinfo.wShowWindow := SW_HIDE;
       startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
@@ -4521,154 +4661,92 @@ begin
     end
     else
       rd := 0;
+  end;
   // https://docs.microsoft.com/en-en/windows/desktop/ProcThread/process-creation-flags
   flags := CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE;
+  // by default, just behave as a standard Windows process would
   if not (roWinNoProcessDetach in options) then
+  begin
+    // RunProcess() option is [] to launch a detached console and a new process group
+    // RunCommand() and RunRedirect() use RUN_CMD = [roWinNoProcessDetach]
     flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
+    exclude(ram, ramCtrlC); // not compatible with detached console or group
+  end;
+  if roWinNewConsole in options then
+  begin
+    // DETACHED_PROCESS is mutually exclusive with CREATE_NEW_CONSOLE
+    flags := (flags or CREATE_NEW_CONSOLE) and not DETACHED_PROCESS;
+    exclude(ram, ramCtrlC); // not compatible with stand-alone console
+  end;
   if roWinJobCloseChildren in options then
-    // create the child process in a new job object
-    flags := flags or CREATE_BREAKAWAY_FROM_JOB;
+    flags := flags or CREATE_BREAKAWAY_FROM_JOB; // child process in a new job
   // actually create the new process
-  created := CreateProcessW(nil, pointer(wcmd), @security, @security, true,
+  created := CreateProcessW(nil, pointer(wcmd), @procsec, @procsec, true,
     flags, pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo);
   if (not created) and
      (flags and CREATE_BREAKAWAY_FROM_JOB <> 0) then
   begin
-    TService.DoLog(sllTrace,
-      'RunCommand: unsupported CREATE_BREAKAWAY_FROM_JOB = %',
-      [WinErrorShort(GetLastError)], nil);
+    TService.DoLog(sllLastError,
+      'RunCommand: possible unsupported CREATE_BREAKAWAY_FROM_JOB', []);
     flags := flags and (not CREATE_BREAKAWAY_FROM_JOB);
     wcmd := SynUnicode(cmd); // CreateProcesW() modified wcmd content: recreate
     UniqueString(wcmd);
-    created := CreateProcessW(nil, pointer(wcmd), @security, @security, true,
+    created := CreateProcessW(nil, pointer(wcmd), @procsec, @procsec, true,
       flags, pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo);
   end;
-  if not created then
-  begin
-    err := GetLastError;
-    TService.DoLog(sllTrace,  'RunCommand: CreateProcess = %',
-      [WinErrorShort(err)], nil);
-    result := -err; // returns CreateProcessW() error as negative number
-    exit;
-  end;
-  // setup the newly created process
-  if flags and CREATE_BREAKAWAY_FROM_JOB <> 0 then
-  begin
-    job := CreateJobToClose(processinfo.dwProcessID);
-    if (job <> 0) and
-       not AssignJobToProcess(job, processinfo.hProcess, 'CloseChildren') then
+  if created then
+  try
+    // setup the newly created process
+    if flags and CREATE_BREAKAWAY_FROM_JOB <> 0 then
     begin
-      CloseHandle(job);
-      job := 0;
-    end
-    else if Assigned(jobtoclose) then
-      jobtoclose^ := job;
-  end;
-  if Assigned(onoutput) then
-    onoutput('', processinfo.dwProcessId);
-  // main wait (and redirect) until the process is finished (or not)
-  if rd <> 0 then
-  begin
-    // wait and redirect - see https://stackoverflow.com/a/25725197/458259
-    CloseHandle(wr);
-    if waitfordelayms = INFINITE then
-      endtix := 0
-    else
+      // roWinJobCloseChildren = run the new process in its own Job
+      job := CreateJobToClose(processinfo.dwProcessID, 'CloseChildren',
+        {allowSilentBreakaway:}true);
+      if (job <> 0) and
+         not AssignJobToProcess(job, processinfo.hProcess, 'CloseChildren') then
+      begin
+        CloseHandle(job);
+        job := 0;
+      end
+      else if Assigned(jobtoclose) then
+        jobtoclose^ := job;
+    end;
+    if Assigned(onoutput) then
+      onoutput('', processinfo.dwProcessId); // notify started
+    // main wait (and redirect) until the process is finished (or not)
+    endtix := 0;
+    if waitfordelayms <> INFINITE then
       endtix := GetTickCount64 + waitfordelayms;
-    repeat
-      exitcode := WaitForSingleObject(processinfo.hProcess, 50);
-      // note: WaitForMultipleObjects() with rd burns 100% of one core :(
-      Win32Check(exitcode <> WAIT_FAILED);
-      RedirectOutput({flush=}false);
-    until (exitcode = WAIT_OBJECT_0) or
-          ((endtix <> 0) and
-           (GetTickCount64 > endtix));
+    if rd <> 0 then
+      CloseHandle(wr) // https://stackoverflow.com/a/25725197/458259
+    else if not waitfor then
+    begin
+      // no wait nor redirection: just launch the process
+      result := 0; // 0 is no true exit code, but CreateProcessW() success
+      exit;
+    end;
+    RedirectAndWait(endtix);
+    // retrieve the exit code or abort the process on timeout
     if GetExitCodeProcess(processinfo.hProcess, exitcode) and
        (exitcode <> STILL_ACTIVE) then
-      result := exitcode // process ended from natural death -> return code
+      result := exitcode // process finished with an exit code
     else
-    begin
-      result := -GetLastError; // not able to retrieve exit code
-      // e.g. -STILL_ACTIVE if aborted by onoutput()=true above
-      terminated := false;
-      if RunAbortTimeoutSecs > 0 then
-      begin
-        if ramCtrlC in ram then  // try Ctrl+C (disabled above)
-        begin
-          terminated := CancelProcess(processinfo.dwProcessId, RunAbortTimeoutSecs);
-          TService.DoLog(sllTrace, 'RunCommand: CancelProcess(%)=%',
-            [processinfo.dwProcessId, ord(terminated)], nil);
-        end;
-        if (not terminated) and
-           (ramQuit in ram) then
-        begin // try WM_QUIT
-          terminated := QuitProcess(processinfo.dwProcessId, 0);
-          TService.DoLog(sllTrace, 'RunCommand: QuitProcess(%)=%',
-            [processinfo.dwProcessId, ord(terminated)], nil);
-          if terminated then
-          begin
-            endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000; // wait ended
-            repeat
-              res := WaitForSingleObject(processinfo.hProcess, 10);
-              RedirectOutput({flush=}true); // mandatory to unlock pipe
-            until (res <> WAIT_TIMEOUT) or
-                  (GetTickCount64 > endtix);
-            terminated := res = WAIT_OBJECT_0;
-          end;
-        end;
-      end;
-      RedirectOutput({flush=}true); // ensure there is no pending data
-      if terminated and
-         // gracefully ended -> try to retrieve the exit code
-         GetExitCodeProcess(processinfo.hProcess, exitcode) then
-        result := exitcode
-      else
-      begin
-        TerminateProcess(processinfo.hProcess, result); // forced kill
-        TService.DoLog(sllTrace, 'RunCommand: TerminateProcess(%)=%',
-          [processinfo.dwProcessId, result], nil);
-      end;
-    end;
+      AbortProcess;
+    // eventually retrieve any pending output
+    if rd <> 0 then
+      RedirectOutputAborted({killed=}true);
+  finally
+    // release the handles created for this process
+    CloseHandle(processinfo.hProcess);
+    CloseHandle(processinfo.hThread);
+    if rd <> 0 then // CloseHandle(wr) has already be done
+      CloseHandle(rd);
+    if (job <> 0) and
+       not Assigned(jobtoclose) then
+        CloseHandle(job); // caller should make CloseHandle(jobtoclose^)
   end
-  else if waitfor then
-    if WaitForSingleObject(processinfo.hProcess, waitfordelayms) = WAIT_FAILED then
-      if waitfordelayms <> INFINITE then
-        result := -1 // still runing after waitfordelayms
-      else
-        result := -GetLastError // failed to wait
-    else if GetExitCodeProcess(processinfo.hProcess, exitcode) then
-        result := exitcode      // waited for process to end -> return code
-      else
-        result := -GetLastError // was not able to retrieve exit code
   else
-    // waitfor is false: asynchronous process launch
-    result := 0;
-  // release the handles created for this process
-  CloseHandle(processinfo.hProcess);
-  CloseHandle(processinfo.hThread);
-  if rd <> 0 then // CloseHandle(wr) has already be done
-    CloseHandle(rd);
-  if (job <> 0) and
-     not Assigned(jobtoclose) then
-      CloseHandle(job); // caller should make CloseHandle(jobtoclose^)
-end;
-
-function RunRedirect(const cmd: TFileName; exitcode: PInteger;
-  const onoutput: TOnRedirect; waitfordelayms: cardinal; setresult: boolean;
-  const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
-var
-  res: integer;
-  redir: PRawByteString;
-begin
-  result := '';
-  if setresult then
-    redir := @result
-  else
-    redir := nil;
-  res := RunCommand(cmd, true, env, options, waitfordelayms, nil,
-    redir, onoutput, wrkdir);
-  if exitcode <> nil then
-    exitcode^ := res;
+    ReturnLastError('CreateProcessW', flags);
 end;
 
 
@@ -4793,7 +4871,8 @@ begin
     RedirectCode(@ByteScanIndex,    @ByteScanIndexPas);
     RedirectCode(@IntegerScanIndex, @IntegerScanIndexPas);
     RedirectCode(@WordScanIndex,    @WordScanIndexPas);
-    // note: FillCharFast is handled by mormot.core.base via ERMSB
+    // note: FillCharFast is handled by mormot.core.base via ERMSB, but some
+    // other (e.g. crypto) code is likely to fail at runtime - use HASNOSSE2
   end;
   {$endif HASNOSSE2}
   {$endif ASMX86}
@@ -5052,14 +5131,8 @@ begin
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
   // 5. compute some minimal entropy using the just retrieved info
-  CoCreateGuid(SystemEntropy.LiveFeed); // very fast and unique value
+  CoCreateGuid(SystemEntropy.LiveFeed); // very fast and unique (but not strong)
   SystemEntropy.Startup := SystemEntropy.LiveFeed;
-  {$ifdef CPUINTEL}
-  if cfTSC in CpuFeatures then // may trigger a GPF if CR4.TSD bit is set
-    with SystemEntropy.Startup do
-      Lo := Lo xor Rdtsc; // unpredictable
-  RdRand32(@SystemEntropy.Startup.c2, 2); // no-op on older CPUs
-  {$endif CPUINTEL}
   crc32c128(@SystemEntropy.Startup, @SystemInfo, SizeOf(SystemInfo));
   crc32c128(@SystemEntropy.Startup, @mem, SizeOf(mem));
   crc32c128(@SystemEntropy.Startup, @OSVersionInfo, SizeOf(OSVersionInfo));

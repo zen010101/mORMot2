@@ -226,21 +226,20 @@ type
   // proper URI registration with administrator rights
   // - for a true AJAX server, see AccessControlAllowOrigin property and
   // consider TRestServer.NoAjaxJson := false for non-extended JSON transmission
-  TRestHttpServer = class(TSynPersistent)
+  TRestHttpServer = class(TObjectRWLightLock)
   protected
-    fShutdownInProgress: boolean;
     fHttpServer: THttpServerGeneric;
     fPort, fDomainName: RawUtf8;
     fPublicAddress, fPublicPort: RawUtf8;
     fRestServers: array of TRestHttpOneServer;
     fRestServerNames: RawUtf8;
-    fSafe: TRWLightLock; // protect fRestServers[]
     fHosts: TSynNameValue;
-    fAccessControlAllowOrigin: RawUtf8;
-    fAccessControlAllowOriginsMatch: TMatchs;
-    fAccessControlAllowCredential: boolean;
-    fUse: TRestHttpServerUse;
     fOptions: TRestHttpServerOptions;
+    fShutdownInProgress: boolean;
+    fUse: TRestHttpServerUse;
+    fAccessControlAllowCredential: boolean;
+    fAccessControlAllowOriginsMatch: TMatchs;
+    fAccessControlAllowOrigin: RawUtf8;
     fRootRedirectToURI: array[boolean] of RawUtf8;
     fLog: TSynLogClass;
     fWebSocketsSigner: TBinaryCookieGenerator;
@@ -678,10 +677,10 @@ begin
           exit
         else
           inc(one);
+    result := -1; // to please Delphi 7
   finally
     fSafe.ReadUnLock;
   end;
-  result := -1;
 end;
 
 function TRestHttpServer.RestServerExists(aServer: TRestServer): boolean;
@@ -1139,7 +1138,7 @@ end;
 
 function TRestHttpServer.Request(Ctxt: THttpServerRequestAbstract): cardinal;
 var
-  call: TRestUriParams; // TRestServer.Uri() don't know anything bout Ctxt
+  call: TRestUriParams; // TRestServer.Uri() don't know anything about Ctxt
   tls, matchcase: boolean;
   match: TRestModelMatch;
   n: integer;
@@ -1196,7 +1195,7 @@ begin
      not IsValidUtf8NotVoid(Ctxt.InContent) then // may use AVX2
   begin
     // rsoOnlyValidUtf8 rejection
-    result := HTTP_NOTACCEPTABLE;
+    result := HTTP_NOTACCEPTABLE; // 406
     exit;
   end;
   // compute the REST-oriented request information
@@ -1221,6 +1220,11 @@ begin
       call.Url := Ctxt.Url;
   call.Method := Ctxt.Method;
   call.InHead := Ctxt.InHeaders;
+  if (Ctxt.InContentType <> '') and // default to JSON if none supplied
+     not IsContentTypeJsonU(Ctxt.InContentType) and
+     ((call.InHead = '') or
+      (FindNameValue(pointer(call.InHead), HEADER_CONTENT_TYPE_UPPER) = nil)) then
+    AppendLine(call.InHead, [HEADER_CONTENT_TYPE, Ctxt.InContentType]);
   call.InBody := Ctxt.InContent;
   // allow custom URI routing before TRestServer instances
   serv := nil;
@@ -1493,7 +1497,7 @@ function TRestHttpServer.NotifyCallback(aSender: TRestServer;
   aResult, aErrorMsg: PRawUtf8): boolean;
 var
   ctxt: THttpServerRequest;
-  url: RawUtf8;
+  url, body: RawUtf8;
   status: cardinal;
 begin
   result := false;
@@ -1506,9 +1510,10 @@ begin
       // -> checked in WebSocketsCallback/IsActiveWebSocket
       ctxt := THttpServerRequest.Create(nil, aConnectionID, nil, 0, [], nil);
       try
-        FormatUtf8('%/%/%',
-          [aSender.Model.Root, aInterfaceDotMethodName, aFakeCallID], url);
-        ctxt.PrepareDirect(url, 'POST', '', '[' + aParams + ']', '', '');
+        Make([aSender.Model.Root, '/', aInterfaceDotMethodName, '/', aFakeCallID], url);
+        { TODO : recognize imfInputIsOctetStream and use BINARY_CONTENT_TYPE }
+        Join(['[', aParams, ']'], body);
+        ctxt.PrepareDirect(url, 'POST', '', body, '', '');
         // fHttpServer.Callback() raises EHttpServer but for bidir servers
         status := fHttpServer.Callback(ctxt, {nonblocking=}aResult = nil);
         if status = HTTP_SUCCESS then

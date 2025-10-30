@@ -49,7 +49,6 @@ type
     fOids: TWordDynArray; // O(n) search in L1 cache - use SSE2 on FPC x86_64
     fOidsFieldTypes: TSqlDBFieldTypeDynArray;
     fOidsCount: integer;
-    fArrayParamsAsBinary: boolean;
     procedure GetForeignKeys; override;
     /// fill mapping of standard OID
     // - at runtime mapping can be defined using Oid2FieldType() method
@@ -85,7 +84,7 @@ type
     // - set this property to true so that binary is sent over the wire for
     // INT4ARRAYOID/INT8ARRAYOID parameters
     property ArrayParamsAsBinary: boolean
-      read fArrayParamsAsBinary write fArrayParamsAsBinary;
+      index cpfArrayParamsAsBinary read GetFlag write SetFlag;
   end;
 
   /// implements a connection via the libpq access layer
@@ -742,7 +741,7 @@ begin
   // JsonDecodedPrepareToSql will detect cPostgreBulkArray and set
   // DecodedFieldTypesToUnnest -> fast bulk insert/delete/update
   fBatchSendingAbilities := [cCreate, cDelete, cUpdate, cPostgreBulkArray];
-  fNoBlobBindArray := true; // no BindArray() on ftBlob
+  NoBlobBindArray := true; // no BindArray() on ftBlob
   // disable MultiInsert SQL and rely on cPostgreBulkArray process for cCreate
   fOnBatchInsert := nil; // see TRestStorageExternal.InternalBatchStop
 end;
@@ -918,8 +917,8 @@ begin
             DoubleToStr(PDouble(@p^.VInt64)^, RawUtf8(p^.VData));
         ftDate:
           // libpq expects space instead of T in ISO-8601 expanded format
-          DateTimeToIso8601Var(PDateTime(@p^.VInt64)^,
-            {expand=}true, fForceDateWithMS, ' ', #0, RawUtf8(p^.VData));
+          DateTimeToIso8601Var(PDateTime(@p^.VInt64)^, {expand=}true,
+            dsfForceDateWithMS in fFlags, ' ', #0, RawUtf8(p^.VData));
         ftUtf8:
           ; // UTF-8 text already in p^.VData buffer
         ftBlob:
@@ -1340,7 +1339,7 @@ begin
           Utf8ToSynUnicode(P, L, SynUnicode(v.VAny));
       end;
     ftBlob:
-      if fForceBlobAsNull then
+      if dsfForceBlobAsNull in fFlags then
         v.VType := varNull
       else
         FastSetRawByteString(RawByteString(v.VAny), P,
@@ -1395,7 +1394,7 @@ begin
           W.AddDirect('"');
         end;
       ftBlob:
-        if fForceBlobAsNull then
+        if dsfForceBlobAsNull in fFlags then
           W.AddNull
         else
           W.WrBase64(P, BlobInPlaceDecode(P,

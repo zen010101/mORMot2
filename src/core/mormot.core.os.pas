@@ -84,10 +84,10 @@ const
   /// human-friendly alias to open a file with no read/write exclusion ($40)
   fmShareReadWrite = fmShareDenyNone;
 
-  /// a convenient constant to open a file for reading without exclusion
+  /// execute FileOpen/TFileStreamEx.Create for reading without exclusion
   fmOpenReadShared = fmOpenRead or fmShareReadWrite;
 
-  /// a convenient constant to open a file for writing without exclusion
+  /// execute FileOpen/TFileStreamEx.Create for writing without exclusion
   fmOpenWriteShared = fmOpenReadWrite or fmShareReadWrite;
 
   /// a convenient constant to create a file without exclusion
@@ -340,6 +340,13 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
 // - warning: Host should be not nil
 // - would detect both IPv4 '127.x.x.x' pattern and plain IPv6 '::1' constant
 function IsLocalHost(Host: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// returns length(Address) if there is no ?parameter nor #anchor in the URI
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+
+/// returns length(Address) if there is no ?#anchor in the URI
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
 
 
@@ -924,8 +931,13 @@ type
     actCortextA725,
     actCortextA520AE,
     actCortextA720AE,
+    actC1Nano,
+    actC1Pro,
+    actC1Ultra,
     actNeoverseN3,
-    actCortextA320);
+    actCortextA320,
+    actC1Premium);
+
   /// a set of recognized ARM/AARCH64 CPU types
   TArmCpuTypes = set of TArmCpuType;
 
@@ -1010,7 +1022,8 @@ const
       {$if declared(RTLVersion122)} + '.2' {$else}
       {$if declared(RTLVersion121)} + '.1' {$ifend} {$ifend} {$ifend}
                               + ' Athens'
-    {$elseif defined(VER370)} + ' 13 Next'
+    {$elseif defined(VER370)} + ' 13 Florence'
+    {$elseif defined(VER380)} + ' 14 Next'
     {$ifend}
   {$endif FPC}
   {$ifdef CPU64} + ' 64 bit' {$else} + ' 32 bit' {$endif};
@@ -1061,63 +1074,6 @@ type
   end;
 
 {$endif UNICODE}
-
-{$endif OSWINDOWS}
-
-var
-  /// system and process 256-bit state
-  // - could be used as 512-bit: followed by other system state global variables
-  SystemEntropy: record
-    /// 128-bit of entropy quickly gathered during unit/process initialization
-    Startup: THash128Rec;
-    /// 128-bit shuffled each time strong randomness is retrieved from the OS
-    // - together with the intangible Startup value, ensure forward secrecy
-    LiveFeed: THash128Rec;
-  end;
-
-  /// the number of physical memory bytes available to the process
-  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
-  SystemMemorySize: PtrUInt;
-
-{$ifdef OSWINDOWS}
-
-  /// the current System information, as retrieved for the current process
-  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
-  // to retrieve the real top-most system information
-  // - note that the lpMinimumApplicationAddress field is replaced by a
-  // more optimistic/realistic value ($100000 instead of default $10000)
-  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
-  SystemInfo: TSystemInfo;
-  /// the current Windows edition, as retrieved for the current process
-  OSVersion: TWindowsVersion;
-  /// is set to TRUE if the current process is a 32-bit image running under WOW64
-  // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
-  // to run seamlessly on 64-bit Windows
-  // - equals always FALSE if the current executable is a 64-bit image
-  IsWow64: boolean;
-  /// is set to TRUE if the current process running through a software emulation
-  // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
-  IsWow64Emulation: boolean;
-  /// low-level Operating System information, as retrieved for the current process
-  OSVersionInfo: TOSVersionInfoEx;
-
-{$else OSWINDOWS}
-
-  /// emulate only the most used fields of Windows' TSystemInfo
-  SystemInfo: record
-    /// retrieved from libc's getpagesize() - is expected to not be 0
-    dwPageSize: cardinal;
-    /// the number of available logical CPUs
-    // - retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
-    // - see CpuSockets for the number of physical CPU sockets
-    dwNumberOfProcessors: cardinal;
-    /// meaningful system information, as returned by fpuname()
-    uts: record
-      sysname, release, version, nodename: RawUtf8;
-    end;
-    /// Linux Distribution release name, retrieved from /etc/*-release
-    release: RawUtf8;
-  end;
 
 {$endif OSWINDOWS}
 
@@ -1490,6 +1446,65 @@ type
   end;
 
 var
+  /// system and process 256-bit entropy dual states
+  // - could be used as 512-bit salt: followed by other system global variables
+  SystemEntropy: record
+    /// 128-bit of entropy quickly gathered during unit/process initialization
+    // - not supposed to change during process execution
+    Startup: THash128Rec;
+    /// 128-bit shuffled each time strong randomness is retrieved from the OS
+    // - set at startup e.g. from getauxval(AT_RANDOM) or CoCreateGuid()
+    // - then e.g. by each FillSystemRandom/GetRawSmbios/LinuxGetRandom call
+    // - together with the intangible Startup value, ensure forward secrecy
+    LiveFeed: THash128Rec;
+  end;
+
+  /// the number of physical memory bytes available to the process
+  // - equals TMemoryInfo.memtotal as retrieved from GetMemoryInfo() at startup
+  SystemMemorySize: PtrUInt;
+
+{$ifdef OSWINDOWS}
+
+  /// the current System information, as retrieved for the current process
+  // - under a WOW64 process, it will use the GetNativeSystemInfo() new API
+  // to retrieve the real top-most system information
+  // - note that the lpMinimumApplicationAddress field is replaced by a
+  // more optimistic/realistic value ($100000 instead of default $10000)
+  // - under BSD/Linux, only contain dwPageSize and dwNumberOfProcessors fields
+  SystemInfo: TSystemInfo;
+  /// the current Windows edition, as retrieved for the current process
+  OSVersion: TWindowsVersion;
+  /// is set to TRUE if the current process is a 32-bit image running under WOW64
+  // - WOW64 is the x86 emulator that allows 32-bit Windows-based applications
+  // to run seamlessly on 64-bit Windows
+  // - equals always FALSE if the current executable is a 64-bit image
+  IsWow64: boolean;
+  /// is set to TRUE if the current process running through a software emulation
+  // - e.g. a Win32/Win64 Intel application running via Prism on Windows for Arm
+  IsWow64Emulation: boolean;
+  /// low-level Operating System information, as retrieved for the current process
+  OSVersionInfo: TOSVersionInfoEx;
+
+{$else OSWINDOWS}
+
+  /// emulate only the most used fields of Windows' TSystemInfo
+  SystemInfo: record
+    /// retrieved from libc's getpagesize() - is expected to not be 0
+    dwPageSize: cardinal;
+    /// the number of available logical CPUs
+    // - retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
+    // - see CpuSockets for the number of physical CPU sockets
+    dwNumberOfProcessors: cardinal;
+    /// meaningful system information, as returned by fpuname()
+    uts: record
+      sysname, release, version, nodename: RawUtf8;
+    end;
+    /// Linux Distribution release name, retrieved from /etc/*-release
+    release: RawUtf8;
+  end;
+
+{$endif OSWINDOWS}
+
   /// global information about the current executable and computer
   // - this structure is initialized in this unit's initialization block below
   // but you need to call GetExecutableVersion to initialize its Version fields
@@ -2597,7 +2612,7 @@ function SetSystemTime(utctime: TUnixTime): boolean;
 
 /// compatibility function, wrapping Win32 API function
 // - returns the current main Window handle on Windows, or 0 on POSIX/Linux
-function GetDesktopWindow: PtrInt;
+function GetDesktopWindow: PtrUInt;
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
 /// returns the curent system code page for AnsiString types
@@ -2692,14 +2707,16 @@ function GetTickCount64: Int64;
 /// returns a system-wide current monotonic timestamp as 32-bit seconds
 // - simply wrap GetTickCount64 div 1000 on Windows/Mac, or call clock_gettime()
 // and return directly its timespec.tv_sec part on Linux/BSD
+// - overflow after 136 years when compared as 32-bit, or 68 years as 31-bit
 function GetTickSec: cardinal;
   {$ifdef OSWINDOWS} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 /// returns how many seconds the system was up, accouting for time when
-// the computer is asleep
+// the computer is asleep, i.e. the time elapsed on the wall clock
 // - on Windows, computes GetTickCount64 div 1000
 // - on Linux/BSD, will use CLOCK_BOOTTIME/CLOCK_UPTIME clock
 // - on MacOS, will use mach_continuous_time() API
+// - overflow after 136 years when compared as 32-bit, or 68 years as 31-bit
 function GetUptimeSec: cardinal;
 
 /// returns the current UTC time
@@ -2788,7 +2805,8 @@ type
 
 /// setup Exception interception for the whole process
 // - the first to call this procedure will be elected until the process ending
-procedure RawExceptionIntercept(const Handler: TOnRawLogException);
+// - returns true on success, false if there is already an handler
+function RawExceptionIntercept(const Handler: TOnRawLogException): boolean;
 
 {$endif NOEXCEPTIONINTERCEPT}
 
@@ -2878,17 +2896,17 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 function FileAgeToWindowsTime(F: THandle): integer;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean; overload;
 
 /// copy the date of one file to another
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFrom(const Dest, Source: TFileName): boolean; overload;
 
 /// copy the date of one file from a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
-// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
+// - FileSetDate(THandle, Age) is not available on POSIX: filename is needed
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
 
 /// set the file date/time from a supplied UTC TUnixTime value
@@ -3239,7 +3257,7 @@ function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 /// creates a directory if not already existing
 // - returns the full expanded directory name, including trailing path delimiter
 // - returns '' on error, unless RaiseExceptionOnCreationFailure is set
-// - you can set NoExpand=true if you now that Directory has already a full path
+// - you can set NoExpand=true if you know that Directory has already a full path
 function EnsureDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: ExceptionClass = nil;
   NoExpand: boolean = false): TFileName; overload;
@@ -3508,7 +3526,7 @@ type
   TDiskPartitions = array of TDiskPartition;
 
 /// return a memory block aligned to 16 bytes, e.g. for proper SMID processs
-// - Size > 128KB will call the OS mmap/VirtualAlloc to returned aligned memory
+// - Size >= 128KB will call the OS mmap/VirtualAlloc to returned aligned memory
 // - do not use FreeMem() on the returned pointer, but FreeMemAligned()
 function GetMemAligned(Size: PtrUInt; FillWith: pointer = nil): pointer;
 
@@ -3730,6 +3748,19 @@ function ConsoleReadBody: RawByteString;
 /// low-level access to the keyboard state of a given key
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
+type
+  TWinWaitFor = (wwfFailed, wwfQuit, wwfTimeout, wwfSignaled);
+
+/// can wait for some time and/or event, not blocking the Windows main thread
+// - supposed to be called in a loop, so expects ms value in [50..200] range
+// - can optionally call WaitForSingleObject(h) instead of plain Sleep()
+// - can intercept messages and return wwfQuit on WM_QUIT on a sub-thread
+// - running on the main thread, would properly call CheckSynchronize(ms) then
+// Application.ProcessMessages, as expected by a regular GUI application
+// - outside the main thread, behave like a single Sleep/WaitForSingleObject
+function WinWaitFor(ms: cardinal; h: THandle = 0;
+  checkSubThreadQuit: boolean = false): TWinWaitFor;
+
 var
   /// used by Win32PWideCharToUtf8() when IsAnsiCompatibleW(P, Len) = false
   // - overriden by mormot.core.unicode for performance and Delphi 7/2007 fix
@@ -3854,6 +3885,11 @@ var
   // - this unit defaults to the RTL, but mormot.core.text.pas will override it
   AppendShortUuid: TAppendShortUuid;
 
+  /// late binding to binary encoding to Base64 or Base64-URI
+  // - as used by mormot.net.sock.pas for its NetBinToBase64() function
+  // - this unit raises an EOSException - properly injected by mormot.core.buffers.pas
+  RawToBase64: function(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+
   /// return the RTTI text of a given enumerate as mormot.core.rtti GetEnumName()
   // - this unit defaults to minimal code, but overriden by mormot.core.rtti.pas
   GetEnumNameRtti: function(Info: pointer; Value: integer): PShortString;
@@ -3862,9 +3898,10 @@ var
 // - under Windows, will use GetConsoleOutputCP() codepage, following CP_OEM
 // - under Linux, will expect the console to be defined with UTF-8 encoding
 // - we don't propose any ConsoleToUtf8() function because Windows depends on
-// the running program itself: most should generates CP_OEM (e.g. 850) as expected,
+// the running program itself: most generate CP_OEM (e.g. 850) as expected,
 // but some could use the system code page or even UTF-16 binary with BOM (!) -
-// so you may consider using AnsiToUtf8() with the proper code page
+// so you may consider using AnsiToUtf8() from mormot.core.unicode.pas with the
+// proper code page depending on each application
 function Utf8ToConsole(const S: RawUtf8): RawByteString;
 
 
@@ -4756,6 +4793,7 @@ type
   /// a thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
   // - just wrap a TLecuyer generator with a TLighLock in a 20-24 bytes structure
   // - as used by SharedRandom to implement Random32/RandomBytes/... functions
+  // - see RandomLecuyer() from mormot.crypt.core.pas to setup a local instance
   {$ifdef USERECORDWITHMETHODS}
   TLecuyerThreadSafe = record
   {$else}
@@ -4836,6 +4874,7 @@ function RandomDouble: double;
 procedure RandomBytes(Dest: pointer; Count: integer);
 
 /// fill a RawByteString with random bytes from the gsl_rng_taus2 generator
+// - content is really binary, i.e. would contain the whole #0..#255 byte range
 // - see also e.g. RandomAnsi7() or RandomIdentifier() in mormot.core.text.pas
 function RandomByteString(Count: integer; var Dest;
   CodePage: cardinal = CP_RAWBYTESTRING): pointer;
@@ -4856,6 +4895,13 @@ procedure RandomGuid(out result: TGuid); overload;
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
 function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// mark a 128-bit random binary into a UUid value according to RFC 4122
+procedure MakeRandomGuid(u: PHash128);
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// check if the supplied UUid value was randomly-generated according to RFC 4122
+function IsRandomGuid(u: PHash128): boolean;
 
 /// seed the global gsl_rng_taus2 Random32/RandomBytes generator
 // - use XorEntropy() and optional entropy/entropylen as derivation source
@@ -4906,7 +4952,10 @@ function SleepDelay(elapsed: PtrInt): PtrInt;
 function SleepStepTime(var start, tix: Int64; endtix: PInt64 = nil): PtrInt;
 
 /// similar to Windows SwitchToThread API call, to be truly cross-platform
-// - call fpnanosleep(10) on POSIX systems, or the homonymous API on Windows
+// - call the homonymous API on Windows
+// - call direclty the sched_yield Linux syscall or the FPC RTL on BSD
+// - you should not call this function in your own code, especially since
+// sched_yield is reported to be unfair and misleading by Linux kernel devs
 procedure SwitchToThread;
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
@@ -5007,7 +5056,7 @@ function CurrentThreadNameShort: PShortString;
 /// returns the thread id and the thread name as a ShortString
 // - returns e.g. 'Thread 0001abcd [shortthreadname]'
 // - for convenient use when logging or raising an exception
-function GetCurrentThreadInfo: ShortString;
+function GetCurrentThreadInfo: TShort63;
 
 /// enter a process-wide giant lock for thread-safe shared process
 // - shall be protected as such:
@@ -5406,7 +5455,7 @@ type
   public
     /// internal method redirecting to WindowsServiceLog global variable
     class procedure DoLog(Level: TSynLogLevel; Fmt: PUtf8Char;
-      const Args: array of const; Instance: TObject);
+      const Args: array of const; Instance: TObject = nil);
     /// Creates the service
     // - the service is added to the internal registered services
     // - main application must instantiate the TServiceSingle class, then call
@@ -5553,6 +5602,7 @@ function GetServicePid(const aServiceName: RawUtf8;
 
 /// try to gently stop a given Windows console app from its ProcessID
 // - will send a Ctrl-C event (acquiring the process console)
+// - won't wait after this event if waitseconds = 0
 function CancelProcess(pid: cardinal; waitseconds: integer): boolean;
 
 /// try to gently quit a Windows process from its ProcessID
@@ -5566,12 +5616,19 @@ function KillProcess(pid: cardinal; waitseconds: integer = 30): boolean;
 /// install a Windows event handler for Ctrl+C pressed on the Console
 function HandleCtrlC(const OnClose: TThreadMethod): boolean;
 
-/// define a Windows Job to close associated processes together
-// - warning: main process should include the CREATE_BREAKAWAY_FROM_JOB flag
+/// define a Windows Job with the flags to close associated processes together
+// - warning: parent process should include the CREATE_BREAKAWAY_FROM_JOB flag
+// - will create a new Job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and
+// JOB_OBJECT_LIMIT_BREAKAWAY_OK
+// - allowSilentBreakaway=true will set JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+// to avoid any unexpected behavior in sensitive child process (which may not
+// include CREATE_BREAKAWAY_FROM_JOB themselves, e.g. ServiceUI.exe)
 // - you should later call CloseHandle() on the returned handle, if not 0 
-function CreateJobToClose(parentpid: cardinal): THandle;
+function CreateJobToClose(parentpid: cardinal; const ctxt: ShortString;
+  allowSilentBreakaway: boolean = false): THandle;
 
 /// associate a process to a Windows Job created by CreateJobToClose()
+// - is called usually just after CreateJobToClose()
 function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boolean;
 
 {$else}
@@ -5709,107 +5766,134 @@ type
   /// callback used by RunRedirect() to notify of console output at runtime
   // - newly console output text is given as raw bytes sent by the application,
   // with no conversion: on POSIX, it is likely to be UTF-8 but on Windows it
-  // depends on the actual program so is likely to be CP_OEM but others could
-  // use the system code page or even UTF-16 binary with BOM (!) - so you
-  // may consider using AnsiToUtf8() with the proper code page
-  // - should return true to stop the execution, or false to continue
+  // depends on the actual program so most generate CP_OEM but others could use
+  // the system code page or even UTF-16 binary with BOM (!) - so you may consider
+  // calling AnsiToUtf8() from mormot.core.unicode.pas with the proper code page
+  // - should return true to stop/abort the execution, or false to continue
   // - is called once when the process is started, with text='', ignoring its return
   // - on idle state (each 200ms), is called with text='' to allow execution abort
   // - the raw process ID (dword on Windows, cint on POSIX) is also supplied
+  // - see RedirectToConsole to write to the console e.g. for debugging purpose
   TOnRedirect = function(const text: RawByteString; pid: cardinal): boolean of object;
 
   /// define how RunCommand() and RunRedirect() run their sub-process
   // - roEnvAddExisting is used when the env pairs should be added to the
   // existing system environment variable
-  // - roWinJobCloseChildren will setup a Windows Job to close any child
-  // process(es) when the created process quits
-  // - roWinNoProcessDetach will avoid creating a Windows sub-process and group
+  // - roWinJobCloseChildren will use the CREATE_BREAKAWAY_FROM_JOB flag and
+  // run CreateJobToClose(allowSilentBreakaway=true) and AssignJobToProcess()
+  // on the new process so that any of its future children would be
+  // synchronized and closed with their father, in a relaxed way
+  // - on Windows, will create its own console and its own execution group, unless
+  // roWinNoProcessDetach is defined - e.g. as RUN_CMD for RunCommand/RunRedirect
+  // - roWinNewConsole won't inherit the parent console, but have its own console
+  // - roWinKeepProcessOnTimeout won't make Ctrl+C / WM_QUIT or TerminateProcess
   TRunOptions = set of (
     roEnvAddExisting,
     roWinJobCloseChildren,
-    roWinNoProcessDetach);
+    roWinNoProcessDetach,
+    roWinNewConsole,
+    roWinKeepProcessOnTimeout);
+
+const
+  /// the default options for RunCommand() and RunRedirect() transient execution
+  // - detaching the process from the console and Job group by default does only
+  // make sense for RunProcess() which will use TRunOptions = []
+  RUN_CMD = [roWinNoProcessDetach];
 
 /// like SysUtils.ExecuteProcess, but allowing not to wait for the process to finish
 // - optional env value follows 'n1=v1'#0'n2=v2'#0'n3=v3'#0#0 Windows layout
+// - by default, TRunOptions = [] so would detach from the current process
+// console and Job group as we would expect from launch a new stand-alone process
 function RunProcess(const path, arg1: TFileName; waitfor: boolean;
   const arg2: TFileName = ''; const arg3: TFileName = '';
   const arg4: TFileName = ''; const arg5: TFileName = '';
   const env: TFileName = ''; options: TRunOptions = []): integer;
 
-/// like fpSystem, but cross-platform
+/// like fpSystem function, but cross-compiler and cross-platform
 // - under POSIX, calls bash only if needed, after ParseCommandArgs() analysis
-// - under Windows (especially Windows 10), creating a process can be dead slow
-// https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
-// - waitfordelayms/processhandle/redirected/onoutput exist on Windows only -
-// and redirected is the raw byte output, which may be OEM, WinAnsi or UTF-16
-// depending on the program itself
-// - parsed is implemented on POSIX only
+// - on Windows, consider RunCommandWin() specific version with more parameters
 // - optional env should be encoded as 'n1=v1'#0'n2=v2'#0#0 pairs
-function RunCommand(const cmd: TFileName; waitfor: boolean;
-  const env: TFileName = ''; options: TRunOptions = [];
-  {$ifdef OSWINDOWS}
-  waitfordelayms: cardinal = INFINITE; processhandle: PHandle = nil;
-  redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
-  const wrkdir: TFileName = ''
-  {$else}
-  parsed: PParseCommands = nil
-  {$endif OSWINDOWS}): integer;
+// - TRunOptions = RUN_CMD as expected from executing a transient command
+// - parsed^ is implemented on POSIX only, and processhandle^ on Windows only
+// - under Windows (especially Windows 10/11), creating a process can be dead
+// slow https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
+function RunCommand(const cmd: TFileName; waitfor: boolean = true;
+  const env: TFileName = ''; options: TRunOptions = RUN_CMD;
+  {$ifdef OSPOSIX} parsed: PParseCommands = nil
+  {$else} processhandle: PHandle = nil {$endif OSPOSIX}): integer;
 
-/// execute a command, returning its output console as UTF-8 text
-// - calling CreateProcessW on Windows (i.e. our RunCommand), and FPC RTL
-// popen/pclose on POSIX
-// - return '' on cmd execution error, or the whole output console content
-// with no conversion: on POSIX, it is likely to be UTF-8 but on Windows it
-// depends on the actual program so is likely to be CP_OEM but others could
-// use the system code page or even UTF-16 binary with BOM (!) - so you
-// may consider using AnsiToUtf8() with the proper code page
-// - will optionally call onoutput() to notify the new output state
-// - aborts if onoutput() callback returns true, or waitfordelayms expires
+/// execute a command, returning its output console as text
+// - calls CreateProcessW on Windows (via our RunCommandWin function), and
+// FPC RTL popen/pclose on POSIX to be truly cross-platform
+// - return '' on cmd execution error, or the whole output console text content
+// with no conversion (unless setresult is false - see below)
+// - on POSIX, result is likely to be UTF-8 but on Windows it depends on each
+// program so most generate CP_OEM, but others could use the system code page or
+// even UTF-16 binary with BOM - so you may consider calling AnsiToUtf8() from
+// mormot.core.unicode.pas with the proper code page generated by this command
+// - will optionally call onoutput() to notify the new output state; aborting if
+// onoutput() callback returns true - see RedirectToConsole global callback
+// - will abort once waitfordelayms expires - if not its default INFINITE
+// - force setresult=false if you only need onouput() and will discard the result
 // - optional env is Windows only, (FPC popen does not support it), and should
 // be encoded as name=value#0 pairs
 // - you can specify a wrkdir if the path specified by cmd is not good enough
+// - TRunOptions = RUN_CMD as expected from executing a transient command
 // - warning: exitcode^ should be a 32-bit "integer" variable, not a PtrInt
 function RunRedirect(const cmd: TFileName; exitcode: PInteger = nil;
   const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE;
   setresult: boolean = true; const env: TFileName = '';
-  const wrkdir: TFileName = ''; options: TRunOptions = []): RawByteString;
+  const wrkdir: TFileName = ''; options: TRunOptions = RUN_CMD): RawByteString;
 
 var
-  /// how many seconds we should wait for gracefull termination of a process
-  // in RunRedirect() - or RunCommand() on Windows
+  /// a RunRedirect() callback for console output e.g. for debugging purpose
+  // - you should call at least once AllocConsole to setup its content
+  RedirectToConsole: TOnRedirect;
+
+  /// global variable to define how many seconds RunRedirect/RunCommand should
+  // wait for gracefull/soft process termination
   // - set 0 to disable gracefull exit, and force hard SIGKILL/TerminateProcess
   RunAbortTimeoutSecs: integer = 5;
 
 {$ifdef OSWINDOWS}
+type
+  /// for use as RunCommandWin() parameter with no "uses Windows" clause
+  TWinProcessInfo = Windows.TProcessInformation;
 
-/// Windows-specific RunCommand() function returning raw TProcessInformation
+  /// how RunRedirect/RunCommand/RunCommandWin could try to gracefully terminate
+  // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
+  // - ramQuit calls QuitProcess(), i.e. send WM_QUIT on all the process threads
+  // - note that hard TerminateProcess is always called after RunAbortTimeoutSecs
+  // timeout, or if this set of methods is void - unless the
+  // roWinKeepProcessOnTimeout option has been specified
+  TRunAbortMethod = (ramCtrlC, ramQuit);
+
+/// Windows-specific RunCommand/RunRedirect function
+// - returning raw TWinProcessInfo and accepting some additional parameters
 function RunCommandWin(const cmd: TFileName; waitfor: boolean;
-  var processinfo: TProcessInformation; const env: TFileName = '';
-  options: TRunOptions = []; waitfordelayms: cardinal = INFINITE;
+  var processinfo: TWinProcessInfo; const env: TFileName = '';
+  options: TRunOptions = RUN_CMD; waitfordelayms: cardinal = INFINITE;
   redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
   const wrkdir: TFileName = ''; jobtoclose: PHandle = nil): integer;
 
-type
-  /// how RunRedirect() or RunCommand() should try to gracefully terminate
-  // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
-  // - ramQuit calls QuitProcess(), i.e. send WM_QUIT on all the process threads
-  // - note that TerminateProcess is always called after RunAbortTimeoutSecs
-  // timeout, or if this set of methods is void
-  TRunAbortMethods = set of (ramCtrlC, ramQuit);
-var
-  /// RunRedirect/RunCommand methods to gracefully terminate before TerminateProcess
-  RunAbortMethods: TRunAbortMethods = [ramCtrlC, ramQuit];
 {$else}
 type
-  /// how RunRedirect() should try to gracefully terminate
+  /// how RunRedirect/RunCommand could try to gracefully terminate
   // - ramSigTerm send a fpkill(pid, SIGTERM) to the process
-  // - note that SIGKILL is always sent after RunAbortTimeoutSecs timeout,
+  // - note that hard SIGKILL is always sent after RunAbortTimeoutSecs timeout,
   // or if ramSigTerm was not supplied
-  TRunAbortMethods = set of (ramSigTerm);
-var
-  /// RunRedirect() methods to gracefully terminate before SIGKILL
-  RunAbortMethods: TRunAbortMethods = [ramSigTerm];
+  TRunAbortMethod = (ramSigTerm);
 {$endif OSWINDOWS}
+type
+  /// define how RunRedirect/RunCommand should try to gracefully terminate
+  TRunAbortMethods = set of TRunAbortMethod;
+const
+  /// by default, RunRedirect/RunCommand tries all soft killing methods
+  RUNABORT_DEFAULT = [low(TRunAbortMethod) .. high(TRunAbortMethod)];
+var
+  /// global variable to define RunRedirect/RunCommand soft termination methods
+  // - used before hard SIGKILL/TerminateProcess
+  RunAbortMethods: TRunAbortMethods = RUNABORT_DEFAULT;
 
 
 implementation
@@ -5954,6 +6038,39 @@ function IsLocalHost(Host: PUtf8Char): boolean;
 begin
   result := (PCardinal(Host)^ = HOST_127) or // also check for c6Localhost:
             (PCardinal(Host)^ = ord(':') + ord(':') shl 8 + ord('1') shl 16);
+end;
+
+function UriTruncLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('?')); // exclude ?arguments
+  if result < 0 then
+    result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
+function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
+var
+  l: PtrInt;
+begin
+  result := PtrUInt(Address);
+  if result = 0 then
+    exit;
+  l := PStrLen(PAnsiChar(result) - _STRLEN)^;
+  result := ByteScanIndex(pointer(Address), l, ord('#')); // exclude #anchor
+  if result < 0 then
+    result := l;
+end;
+
+function {%H-}_RawToBase64(Bin: pointer; Bytes: PtrInt; Base64Uri: boolean): RawUtf8;
+begin
+  raise EOSException.Create('No RawToBase64(): needs mormot.core.buffers.pas');
 end;
 
 
@@ -6256,7 +6373,7 @@ type
     EFAULT, EINVAL, EMFILE, EWOULDBLOCK, ENOTSOCK, ENETDOWN,
     ENETUNREACH, ENETRESET, ECONNABORTED, ECONNRESET, ENOBUFS,
     ETIMEDOUT, ECONNREFUSED, TRY_AGAIN,
-    // most common WinHttp API errors (in range 12000...12152)
+    // most common WinHttp API (ERROR_WINHTTP_*) errors in range 12000...12152
     TIMEOUT, OPERATION_CANCELLED, CANNOT_CONNECT,
     CLIENT_AUTH_CERT_NEEDED, INVALID_SERVER_RESPONSE,
     // some SEC_I_* status as returned by SSPI
@@ -6279,10 +6396,10 @@ const
     $c0000092, $c0000093, $c0000094, $c0000095, $c0000096, $c00000fd,
     // sparse system errors
     183, 234, 701, 1150, 1450, 1722, 1907, 1909,
-    // main Windows Socket API (WSA) errors
+    // main Windows Socket API (WSA*) errors
     10014, 10022, 10024, 10035, 10038, 10050, 10051, 10052, 10053, 10054, 10055,
     10060, 10061, 11002,
-    // most common WinHttp API errors (in range 12000...12152)
+    // most common WinHttp API (ERROR_WINHTTP_*) errors in range 12000...12152
     12002, 12017, 12029, 12044, 12152,
     // some SEC_I_* status as returned by SSPI
     $00090312, $00090313, $00090314, $00090317, $00090320, $00090321);
@@ -6535,8 +6652,12 @@ const
     $0d87,  // actCortextA725
     $0d88,  // actCortextA520AE
     $0d89,  // actCortextA720AE
+    $0d8a,  // actC1Nano
+    $0d8b,  // actC1Pro
+    $0d8c,  // actC1Ultra
     $0d8e,  // actNeoverseN3
-    $0d8f); // actCortextA320
+    $0d8f,  // actCortextA320
+    $0d90); // actC1Premium
 
   ARMCPU_IMPL: array[TArmCpuImplementer] of byte = (
     0,    // aciUnknown
@@ -6575,8 +6696,8 @@ const
      'Cortex-710',  'Cortex-X2',   'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
      'Cortex-X1C',  'Cortex-A715', 'Cortex-X3',   'Neoverse-V2', 'Cortex-A520',
      'Cortex-A720', 'Cortex-X4',   'Neoverse-V3AE','Neoverse-V3','Cortex-X925',
-     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'Neoverse-N3',
-     'Cortex-A320');
+     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'C1-Nano', 'C1-Pro',
+     'C1-Ultra',    'Neoverse-N3',   'Cortex-A320', 'C1-Premium');
 
   ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of string[18] = (
       '',
@@ -7155,8 +7276,10 @@ constructor TFileStreamEx.CreateFromHandle(aHandle: THandle;
 begin
   if not ValidHandle(aHandle) then
     raise EOSException.CreateFmt('%s.Create(%s) failed as %s',
-      [ClassNameShort(self)^, aFileName, GetErrorShort]);
-  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it 
+      [ClassNameShort(self)^, aFileName, GetErrorShort])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame)
+    {$else} at ReturnAddress {$endif};
+  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it
   fFileName := aFileName;
   fDontReleaseHandle := aDontReleaseHandle;
 end;
@@ -7864,31 +7987,30 @@ procedure SynRaiseProc(Obj: TObject; Addr: CodePointer;
 var
   ctxt: TSynLogExceptionContext;
   backuplasterror: DWord;
-  backuphandler: TOnRawLogException;
 begin
   if (Obj <> nil) and
-     Obj.InheritsFrom(Exception) then
+     Obj.InheritsFrom(Exception) and
+     Assigned(_RawLogException) then
   begin
     backuplasterror := GetLastError;
-    backuphandler := _RawLogException;
-    if Assigned(backuphandler) then
-      try
-        _RawLogException := nil; // disable nested exception
-        ctxt.EClass := PPointer(Obj)^;
-        ctxt.EInstance := Exception(Obj);
-        ctxt.EAddr := PtrUInt(Addr);
-        if Obj.InheritsFrom(EExternal) then // e.g. EDivByZero or EMathError
-          ctxt.ELevel := sllExceptionOS
-        else
-          ctxt.ELevel := sllException; // regular "raise" exception
-        ctxt.ETimestamp := UnixTimeUtc;
-        ctxt.EStack := pointer(Frame);
-        ctxt.EStackCount := FrameCount;
-        backuphandler(ctxt);
-      except
-        { ignore any nested exception }
-      end;
-    _RawLogException := backuphandler;
+    try
+      ctxt.EClass := PPointer(Obj)^;
+      ctxt.EInstance := Exception(Obj);
+      ctxt.EAddr := PtrUInt(Addr);
+      if Obj.InheritsFrom(EExternal) then // e.g. EDivByZero or EMathError
+        ctxt.ELevel := sllExceptionOS
+      else
+        ctxt.ELevel := sllException; // regular "raise" exception
+      ctxt.ETimestamp := UnixTimeUtc;
+      ctxt.EStack := pointer(Frame);
+      ctxt.EStackCount := FrameCount;
+      _RawLogException(ctxt); // e.g. SynLogException() from mormot.core.log
+      // note that SynLogException() will use PerThreadInfo.ExceptionIgnore
+      // to avoid recursive exception loggin: _RawLogException should not be set
+      // to nil or exceptions on concurrent threads would not be logged
+    except
+      { ignore any nested exception }
+    end;
     SetLastError(backuplasterror); // may have changed above
   end;
   if Assigned(OldRaiseProc) then
@@ -7898,38 +8020,47 @@ end;
 {$endif WITH_RAISEPROC}
 
 var
-  RawExceptionIntercepted: boolean;
+  RawExceptionIntercepted: boolean; // single global Exception interception
 
-procedure RawExceptionIntercept(const Handler: TOnRawLogException);
+function RawExceptionIntercept(const Handler: TOnRawLogException): boolean;
 begin
-  _RawLogException := Handler;
-  if RawExceptionIntercepted or
-     not Assigned(Handler) then
-    exit;
-  RawExceptionIntercepted := true; // intercept once
-  {$ifdef WITH_RAISEPROC}
-  // FPC RTL redirection function
-  if not Assigned(OldRaiseProc) then
-  begin
-    OldRaiseProc := RaiseProc;
-    RaiseProc := @SynRaiseProc;
+  result := false;
+  GlobalLock;
+  try
+    _RawLogException := Handler; // e.g. SynLogException() from mormot.core.log
+    if RawExceptionIntercepted or
+       not Assigned(Handler) then
+      exit;
+    RawExceptionIntercepted := true; // intercept once
+    {$ifdef WITH_RAISEPROC}
+    // FPC RTL redirection function
+    if not Assigned(OldRaiseProc) then
+    begin
+      OldRaiseProc := RaiseProc;
+      RaiseProc := @SynRaiseProc;
+      result := true;
+    end;
+    {$endif WITH_RAISEPROC}
+    {$ifdef WITH_VECTOREXCEPT} // SEH32/SEH64 official API
+    if not AddVectoredExceptionHandlerCalled then
+    begin
+      AddVectoredExceptionHandler(0, @SynLogVectoredHandler);
+      AddVectoredExceptionHandlerCalled := true;
+      result := true;
+    end;
+    {$endif WITH_VECTOREXCEPT}
+    {$ifdef WITH_RTLUNWINDPROC}
+    // Delphi x86 RTL redirection function
+    if not Assigned(OldUnWindProc) then
+    begin
+      OldUnWindProc := RTLUnwindProc;
+      RTLUnwindProc := @SynRtlUnwind;
+      result := true;
+    end;
+    {$endif WITH_RTLUNWINDPROC}
+  finally
+    GlobalUnLock;
   end;
-  {$endif WITH_RAISEPROC}
-  {$ifdef WITH_VECTOREXCEPT} // SEH32/SEH64 official API
-  if not AddVectoredExceptionHandlerCalled then
-  begin
-    AddVectoredExceptionHandler(0, @SynLogVectoredHandler);
-    AddVectoredExceptionHandlerCalled := true;
-  end;
-  {$endif WITH_VECTOREXCEPT}
-  {$ifdef WITH_RTLUNWINDPROC}
-  // Delphi x86 RTL redirection function
-  if not Assigned(OldUnWindProc) then
-  begin
-    OldUnWindProc := RTLUnwindProc;
-    RTLUnwindProc := @SynRtlUnwind;
-  end;
-  {$endif WITH_RTLUNWINDPROC}
 end;
 
 {$endif NOEXCEPTIONINTERCEPT}
@@ -8169,19 +8300,22 @@ begin
 end;
 
 const
-  OS_ALIGNED = 128 shl 10; // call the OS for any block > 128KB
+  OS_ALIGNED = 128 shl 10; // call the OS for any block >= 128KB
 
 function GetMemAligned(Size: PtrUInt; FillWith: pointer): pointer;
 var
   pad: PtrUInt;
 begin
   if Size >= OS_ALIGNED then
-    result := _GetLargeMem(Size) // mmap or VirtualAlloc will align to pagesize
-  else
+  begin
+    Size := (Size + 65535) and not 65535;   // default wrap to 64KB boundaries
+    result := _GetLargeMem(Size)            // mmap/VirtualAlloc is 4KB aligned
+  end
+  else // smaller blocks will just use the heap, with a padding hidden prefix
   begin
     GetMem(result, Size + 16); // 15 bytes for alignment + 1 byte for padding
     pad := 16 - (PtrUInt(result) and 15);   // adjust by 1..16 bytes
-    inc(PAnsiChar(result), pad);
+    inc(PAnsiChar(result), pad);            // Delphi Win32 only needs padding
     PAnsiChar(result)[-1] := AnsiChar(pad); // always store the padding
   end;
   if FillWith <> nil then
@@ -8194,7 +8328,8 @@ begin
     exit;
   if Size >= OS_ALIGNED then
   begin
-    _FreeLargeMem(p, Size); // munmap or VirtualFree
+    Size := (Size + 65535) and not 65535;   // as in GetMemAligned()
+    _FreeLargeMem(p, Size);                 // munmap or VirtualFree
     exit;
   end;
   dec(PAnsiChar(p), ord(PAnsiChar(p)[-1])); // adjust back by 1..16 bytes
@@ -8360,6 +8495,28 @@ begin
   end;
 end;
 
+function _ToConsole(self: TObject; const text: RawByteString; pid: cardinal): boolean;
+begin
+  result := false; // continue
+  if (text = '') or
+     not HasConsole then
+    exit;
+  ConsoleCriticalSection.Lock;
+  try
+    FileWriteAll(StdOut, pointer(text), length(text)); // no code page involved
+  finally
+    ConsoleCriticalSection.UnLock;
+  end;
+end;
+
+procedure AllocConsole;
+begin
+  TMethod(RedirectToConsole).Code := @_ToConsole;
+  {$ifdef OSWINDOWS}
+  WinAllocConsole;
+  {$endif OSWINDOWS}
+end;
+
 var
   GlobalCriticalSection: TOSLock;
 
@@ -8474,9 +8631,6 @@ var
   function LoadOne(lib: TFileName; current: PtrInt): boolean;
   var
     j: PtrInt;
-    {$ifdef OSWINDOWS}
-    cwd: TFileName;
-    {$endif OSWINDOWS}
   begin
     // check library name
     result := false;
@@ -8509,16 +8663,18 @@ var
     try
       if nwd <> '' then
       begin
-        GlobalLock; // SetCurrentDir() is for the whole process not the thread
-        cwd := GetCurrentDir;
-        SetCurrentDir(nwd);
-        lib := ExtractFileName(lib); // seems more stable that way
+        GlobalLock; // SetDllDirectoryW() is for the whole process not thread
+        if not LibrarySetDirectory(nwd) then // as documented on microsoft.com
+        begin
+          GlobalUnLock;
+          nwd := '';
+        end;
       end;
       fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box
     finally
       if nwd <> '' then
       begin
-        SetCurrentDir(cwd{%H-});
+        SetDllDirectoryW(nil); // revert to default
         GlobalUnLock;
       end;
     end;
@@ -8809,8 +8965,10 @@ begin
     Command.Parse;
   end;
   AfterExecutableInfoChanged; // set Executable.ProgramFullSpec+Hash
-  crc32c128(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache)); // some more
+  // finalize SystemEntropy.Startup
+  crcblocks(@SystemEntropy.Startup, @BaseEntropy, 512 div 128); // cpuid+rdrand+rdtsc
   crcblock(@SystemEntropy.Startup, @Executable.Hash);
+  crcblocks(@SystemEntropy.Startup, @CpuCache, SizeOf(CpuCache) div SizeOf(THash128));
 end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -9957,35 +10115,86 @@ end;
 
 { **************** TSynLocker Threading Features }
 
+const
+  // default value for all spining, up to 993 "pause" opcode calls
+  // - on Intel, taking around 5us on old CPU, but modern Intel have bigger pause
+  // latency (up to 100 cycles) so takes up to 50us
+  // - AMD Zen 3 and later has a latency of only 1-2 cycles so we identify them
+  // via CPUID and adjust a SpinFactor global variable at startup to reach 5us
+  // - 5..50us range seems consistent with our eventual nanosleep(10us) syscall
+  SPIN_COUNT = pred(6 shl 5); // = 191
+
 // as reference, take a look at Linus insight (TL&WR: better use futex)
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
+
+// our light locks do not use the resource of an associated futex, so are easier
+// if there is almost no contention - and really seldom call fpnanosleep(10us)
+
 {$ifdef CPUINTEL}
-procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
+var
+  SpinFactor: PtrUInt = 1; // default value on Intel - set to 10 on AMD Zen3+
+
+// on Intel/AMD, the pause CPU instruction would relax the core
+// - but it is expected to be inlined within the spinning loop itself
+// - sadly, Delphi does not support inlined asm on Win64 so we use a function
+{$ifdef WIN64DELPHI}
+procedure DoPause(n: PtrUInt);
 asm
-      pause
+@s:   pause          // = "rep nop" opcode
+      dec     rcx
+      jnz     @s     // within its own 1..16x loop (better than nothing)
 end;
+{$endif WIN64DELPHI}
 {$endif CPUINTEL}
 
+{$ifdef FPC_CPUARM}
 const
-  {$ifdef CPUINTEL}
-  SPIN_COUNT = 1000;
-  {$else}
-  SPIN_COUNT = 100; // since DoPause does nothing, switch to thread sooner
-  {$endif CPUINTEL}
+  SpinFactor = 2; // ARM yield has smaller latency than Intel's pause
+
+// "yield" is available since ARMv6K architecture, including ARMv7-A and ARMv8-A
+procedure DoPause; assembler; nostackframe;
+asm
+     yield // a few cycles, but helps modern CPU adjust their power requirements
+end;
+{$endif FPC_CPUARM}
 
 function DoSpin(spin: PtrUInt): PtrUInt;
-  {$ifdef CPUINTEL} {$ifdef HASINLINE} inline; {$endif} {$endif}
-  // on Intel, the pause CPU instruction would relax the core
-  // on ARM/AARCH64, the not-inlined function call makes a small delay
 begin
-  {$ifdef CPUINTEL}
-  DoPause;
-  {$endif CPUINTEL}
+  {$ifdef CPUINTELARM}
+  // adaptive spinning to reduce cache coherence traffic
+  result := (SPIN_COUNT - spin) shr 5; // 0..5 range, each 32 times
+  if result <> 0 then // no pause up to 32 times (low latency acquisition)
+  {$ifdef OSLINUX_SCHEDYIELDONCE}      // yield once during the process
+  {$ifndef OSLINUX_SCHEDYIELD}         // if not already = SwitchToThread
+  if spin = SPIN_COUNT shr 2 then
+    Do_SysCall(syscall_nr_sched_yield) // properly defined in syscall.pp
+  else
+  {$endif OSLINUX_SCHEDYIELD}
+  {$endif OSLINUX_SCHEDYIELDONCE}
+  begin // exponential backoff: 1,2,4,8,16 x DoPause
+    result := SpinFactor shl pred(result);
+    // "pause" called 992 times until SwithToThread = up to 50us on modern CPU
+    {$ifdef WIN64DELPHI}
+    DoPause(result);
+    {$else}
+    repeat
+      {$ifdef CPUINTEL}
+      asm
+        pause // "rep nop" opcode should be inlined within the spinning loop
+      end;
+      {$else}
+      DoPause; // "yield" arm/aarch64 opcode
+      {$endif CPUINTEL}
+      dec(result);
+    until result = 0;
+    {$endif WIN64DELPHI}
+  end;
+  {$endif CPUINTELARM}
   dec(spin);
-  if spin = 0 then
+  if spin = 0 then // eventually call the OS for long wait
   begin
-    SwitchToThread; // fpnanosleep on POSIX
-    spin := SPIN_COUNT;
+    SwitchToThread; // homonymous Win API call or proper POSIX call
+    spin := SPIN_COUNT; // try again
   end;
   result := spin;
 end;
@@ -10201,7 +10410,8 @@ end;
 procedure TRWLock.AssertDone;
 begin
   if Flags <> 0 then
-    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags]);
+    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags])
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 // dedicated asm for this most simple (and used) method
@@ -11120,11 +11330,22 @@ begin
   RandomGuid(result);
 end;
 
-procedure RandomGuid(out result: TGuid);
+procedure MakeRandomGuid(u: PHash128);
 begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+  PCardinal(@u[6])^ := (PCardinal(@u[6])^ and $ff3f0fff) or $00804000;
+  // u[7] := PtrUInt(u[7] and $0f) or $40; // version bits 12-15 = 4 (random)
+  // u[8] := PtrUInt(u[8] and $3f) or $80; // reserved bits 6-7 = 1
+end;
+
+function IsRandomGuid(u: PHash128): boolean;
+begin
+  result := (u[7] and $f0 = $40) and (u[8] and $c0 = $80);
+end;
+
+procedure RandomGuid(out result: TGuid);
+begin
   SharedRandom.Fill(@result, SizeOf(TGuid));
-  PCardinal(@result.D3)^ := (PCardinal(@result.D3)^ and $ff3f0fff) + $00804000;
-  // version bits 12-15 = 4 (random) and reserved bits 6-7 = 1
+  MakeRandomGuid(@result);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -11179,7 +11400,7 @@ end;
 function SleepDelay(elapsed: PtrInt): PtrInt;
 begin
   if elapsed < 50 then
-    result := 0 // 10us on POSIX, SwitchToThread on Windows
+    result := 0 // redirect to SwitchToThread
   else if elapsed < 200 then
     result := 1
   else if elapsed < 500 then
@@ -11339,10 +11560,13 @@ begin
   ShortStringToAnsi7String(_CurrentThreadName, result);
 end;
 
-function GetCurrentThreadInfo: ShortString;
+function GetCurrentThreadInfo: TShort63;
 begin
-  result := ShortString(format('Thread %x [%s]',
-    [PtrUInt(GetCurrentThreadId), _CurrentThreadName]));
+  result := 'Thread ';
+  AppendShortIntHex(PtrUInt(GetCurrentThreadId), result);
+  AppendShortTwoChars(ord(' ') + ord('[') shl 8, @result);
+  AppendShort(_CurrentThreadName, result);
+  AppendShortChar(']', @result);
 end;
 
 
@@ -11613,6 +11837,12 @@ begin
   NULL_STR_VAR := 'null';
   BOOL_UTF8[false] := 'false';
   BOOL_UTF8[true]  := 'true';
+  {$ifdef CPUINTEL}
+  if (CpuManufacturer = icmAmd) and
+     (CpuFamily = $19) and
+     (CpuModel >= $30) then // Zen 3 or later
+    SpinFactor := 10;       // "pause" opcode is only 1-2 cycles
+  {$endif CPUINTEL}
   // minimal stubs which will be properly implemented in other mormot.core units
   GetExecutableLocation := _GetExecutableLocation; // mormot.core.log
   SetThreadName         := _SetThreadName;
@@ -11620,6 +11850,7 @@ begin
   ShortToUuid           := _ShortToUuid;           // mormot.core.text
   AppendShortUuid       := _AppendShortUuid;
   GetEnumNameRtti       := _GetEnumNameRtti;       // mormot.core.rtti
+  RawToBase64           := _RawToBase64;           // mormot.core.buffers
 end;
 
 procedure FinalizeUnit;

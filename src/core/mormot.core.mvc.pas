@@ -809,7 +809,7 @@ type
     class procedure GotoDefault(var Action: TMvcAction;
       Status: cardinal = HTTP_TEMPORARYREDIRECT);
     /// wrapper to redirect to the 'Error' view with a HTTP status code
-    // - is simimlar to EMvcApplication.GotoError() with less overhead, but
+    // - is similar to EMvcApplication.GotoError() with less overhead, but
     // needing an explicit "exit" to stop the execution flow of the method
     // ! procedure TMyMvcApplication.Default(var Scope: variant);
     // ! var data: variant;
@@ -823,16 +823,16 @@ type
     // ! end;
     procedure RedirectError(ErrorCode: integer); overload;
     /// wrapper to redirect to the 'Error' view with an error message
-    // - is simimlar to EMvcApplication.GotoError() with less overhead, but
+    // - is similar to EMvcApplication.GotoError() with less overhead, but
     // needing an explicit "exit" to stop the execution flow of the method
     procedure RedirectError(const Msg: string;
       ErrorCode: integer = HTTP_BADREQUEST); overload;
     /// wrapper to redirect to the 'Default' view
-    // - is simimlar to EMvcApplication.Default() with less overhead, but
+    // - is similar to EMvcApplication.Default() with less overhead, but
     // needing an explicit "exit" to stop the execution flow of the method
     procedure RedirectDefault(Status: cardinal = HTTP_TEMPORARYREDIRECT);
     /// wrapper to override the current view into another
-    // - is simimlar to EMvcApplication.GotoView() with less overhead, but
+    // - is similar to EMvcApplication.GotoView() with less overhead, but
     // needing an explicit "exit" to stop the execution flow of the method
     // - as called by other RedirectError/RedirectDefault methods
     // - if status is HTTP_TEMPORARYREDIRECT, it will change the URI
@@ -2187,23 +2187,27 @@ end;
 class procedure EMvcApplication.GotoView(const aMethod: RawUtf8;
   const aParametersNameValuePairs: array of const; aStatus: cardinal);
 begin
-  raise CreateGotoView(aMethod, aParametersNameValuePairs, aStatus);
+  raise CreateGotoView(aMethod, aParametersNameValuePairs, aStatus)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 class procedure EMvcApplication.GotoError(const aErrorMessage: string;
   aErrorCode: integer);
 begin
-  raise CreateGotoError(aErrorMessage, aErrorCode);
+  raise CreateGotoError(aErrorMessage, aErrorCode)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 class procedure EMvcApplication.GotoError(aHtmlErrorCode: integer);
 begin
-  raise CreateGotoError(aHtmlErrorCode);
+  raise CreateGotoError(aHtmlErrorCode)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 class procedure EMvcApplication.Default(aStatus: cardinal);
 begin
-  raise CreateDefault(aStatus);
+  raise CreateDefault(aStatus)
+  {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 

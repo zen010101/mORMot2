@@ -1183,7 +1183,9 @@ begin
   P := GotoNextNotSpace(temp.buf);
   if P^ <> '{' then
     exit;
-  P := GotoNextNotSpace(P + 1);
+  repeat
+    inc(P)
+  until not (P^ in [#1..' ']);
   info.Json := P;
   if P^ <> '}' then
   repeat
@@ -1296,7 +1298,7 @@ var
   temp: TSynTempBuffer;
 begin
   result := '';
-  P := PosChar(pointer(Token), '.');
+  P := PosCharU(Token, '.');
   if (P = nil) or
      (PosChar(P + 1, '.') = nil) then
     exit;
@@ -1333,7 +1335,7 @@ begin
   if Token = '' then
     exit;
   result := jwtInvalidAlgorithm;
-  P := PosChar(pointer(Token), '.');
+  P := PosCharU(Token, '.');
   if P = nil then
     exit;
   if self <> TJwtAbstract then

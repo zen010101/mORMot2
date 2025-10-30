@@ -188,6 +188,8 @@ type
     a: TOrmPeopleObjArray;
     fAdd, fDel: RawUtf8;
     fQuickSelectValues: TIntegerDynArray;
+    rnd: TLecuyer;
+    procedure Setup; override;
     function QuickSelectGT(IndexA, IndexB: PtrInt): boolean;
     procedure intadd(const Sender; Value: integer);
     procedure intdel(const Sender; Value: integer);
@@ -340,6 +342,11 @@ end;
 
 
 { TTestCoreBase }
+
+procedure TTestCoreBase.Setup;
+begin
+  RandomLecuyer(rnd);
+end;
 
 procedure TTestCoreBase._CamelCase;
 var
@@ -531,12 +538,12 @@ const
       {$ifdef FPC}
       CheckEqual(popcnt(v), c);
       {$endif FPC}
-      v := random32;
+      v := rnd.Next;
       c := BSRdwordPurePascal(v);
       CheckEqual(c, BSRdword(v));
       CheckEqual(c, BSRqword(v), 'bsrq2');
       {$ifdef CPU64}
-      v := v or (PtrUInt(Random32) shl 32);
+      v := v or (PtrUInt(rnd.Next) shl 32);
       {$endif CPU64}
       c := GetBitsCount64(v, POINTERBITS);
       CheckEqual(GetBitsCountPtrInt(v), c);
@@ -757,8 +764,8 @@ begin
     if i < 500 then
       V1 := i * 3
     else
-      V1 := Random64 shr 28;
-    if Random32 and 3 = 0 then
+      V1 := rnd.NextQWord shr 28;
+    if rnd.Next and 3 = 0 then
       V1 := -V1;
     v := Curr64ToStr(PInt64(@V1)^);
     tmp[0] := AnsiChar(Curr64ToPChar(PInt64(@V1)^, @tmp[1]));
@@ -882,8 +889,8 @@ begin
   Content := '';
   for i := 1 to 1000 do
   begin
-    Si := Random32(20);
-    Ni := Random32(50);
+    Si := rnd.Next(20);
+    Ni := rnd.Next(50);
     Vi := Si * Ni + Ni;
     if Si = 0 then
       S := ''
@@ -1326,7 +1333,8 @@ end;
 procedure TTestCoreBase._TDynArray;
 var
   AI, AI2: TIntegerDynArray;
-  AU: TRawUtf8DynArray;
+  AU, AU2: TRawUtf8DynArray;
+  AV1, AV2: TVariantDynArray;
   AR: TRecs;
   AF: TFVs;
   AF2: TFV2s;
@@ -1451,6 +1459,30 @@ begin
   Check(not IsRawUtf8DynArray(TypeInfo(TIntegerDynArray)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TPointerDynArray)), 'IsRawUtf8DynArray3');
   Check(not IsRawUtf8DynArray(TypeInfo(TAmountDynArray)), 'IsRawUtf8DynArray4');
+  SetLength(AU, 2);
+  AU[0] := 'true';
+  AU[1] := 'false';
+  SetLength(AU2, 2);
+  AU2[0] := 'True';
+  AU2[1] := 'False';
+  Check(DynArrayEquals(TypeInfo(TRawUtf8DynArray), AU, AU2,
+    nil, nil, {CaseInsensitive=}True));
+  AU := nil; // for test below
+  SetLength(AV1, 2);
+  AV1[0] := 'true';
+  AV1[1] := 'false';
+  SetLength(AV2, 2);
+  AV2[0] := 'True';
+  AV2[1] := 'False';
+  Check(DynArrayEquals(TypeInfo(TVariantDynArray), AV1, AV2,
+    nil, nil, {CaseInsensitive=}True));
+  AV1[0] := SynUnicode('true');
+  AV1[1] := SynUnicode('false');
+  SetLength(AV2, 2);
+  AV2[0] := SynUnicode('True');
+  AV2[1] := SynUnicode('False');
+  Check(DynArrayEquals(TypeInfo(TVariantDynArray), AV1, AV2,
+    nil, nil, {CaseInsensitive=}True));
   W := TJsonWriter.CreateOwnedStream;
   // validate TBooleanDynArray
   dyn1.Init(TypeInfo(TBooleanDynArray), AB);
@@ -2667,6 +2699,36 @@ begin
     finally
       fo.Free;
     end;
+    // TRttiMap.RandomA/B and Compare methods - useful e.g. for testing DTOs
+    m.Map('id', 'rowid');
+    CheckEqual(o1.IDValue, 0, 'o1id1');
+    CheckEqual(p.RowID, 0, 'pRowID1');
+    for i := 1 to 100 do
+    begin
+      o1.IDValue := 0;
+      CheckEqual(o1.IDValue, 0, 'o1id');
+      p.RowID := 0;
+      CheckEqual(p.RowID, 0, 'pRowID2');
+      m.RandomA(o1);
+      if o1.IDValue = 0 then
+        m.RandomA(o1); // 1 chance over 2^64 - but not twice = 2^128
+      CheckNotEqual(o1.IDValue, 0, 'rndo1id');
+      CheckNotEqual(m.Compare(o1, @p), 0, 'rndA');
+      CheckEqual(p.RowID, 0, 'pRowID3');
+      m.ToB(o1, @p);
+      CheckNotEqual(p.RowID, 0, 'pRowID4');
+      CheckEqual(p.RowID, o1.IDValue, 'ids1');
+      CheckEqual(m.Compare(o1, @p), 0, 'cmpA');
+      p.RowID := 0;
+      m.RandomB(@p);
+      if p.RowID = 0 then
+        m.RandomB(@p); // 1 chance over 2^64 - but not twice = 2^128
+      CheckNotEqual(p.RowID, 0, 'pRowID4');
+      CheckNotEqual(m.Compare(o1, @p), 0, 'rndB');
+      m.ToA(o1, @p);
+      CheckEqual(m.Compare(o1, @p), 0, 'cmpB');
+      CheckEqual(p.RowID, o1.IDValue, 'ids2');
+    end;
   finally
     o1.Free;
     o2.Free;
@@ -2676,6 +2738,8 @@ begin
   try
     CheckEqual(fr.Count, 0);
     fr.Filter(nil);
+    p.FirstName := 'toto'; // reset the expected values
+    p.LastName := 'titi';
     fr.Filter(@p);
     Check(fr.Validate(@p) = '');
     fr.AddClass('firstName', [TSynFilterUpperCase, TSynValidateNonVoidText]);
@@ -2775,7 +2839,10 @@ begin
   for i := 9 to 15 do
     CheckEqual(BitsToBytes(i), 2);
   s := GuidToRawUtf8(Guid);
-  Check(s = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
+  CheckEqual(s, '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
+  Check(s[16] = '4');
+  Check(s[21] in ['8', '9', 'A', 'B']);
+  Check(IsRandomGuid(@Guid));
   Check(TextToGuid(@s[2], @g2)^ = '}');
   Check(IsEqualGuid(g2, Guid));
   Check(GuidToString(Guid) = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
@@ -2807,7 +2874,7 @@ begin
   for i := 1 to 100 do
   begin
     x2 := x;
-    delete(x2, Random32(length(x2)) + 1, 2);
+    delete(x2, rnd.Next(length(x2)) + 1, 2);
     Check(x <> x2);
     Check(HumanHexCompare(x, x2) <> 0);
     HumanHexCompare(x, x2);
@@ -2815,7 +2882,7 @@ begin
   for i := 1 to 100 do
   begin
     x2 := x;
-    j := Random32(length(x2)) + 1;
+    j := rnd.Next(length(x2)) + 1;
     delete(x2, j, 1);
     Check(x <> x2);
     Check((HumanHexCompare(x, x2) = 0) = (x[j] = ':'));
@@ -2833,7 +2900,7 @@ begin
   s := s + s; // validates also our patched RTL
   CheckEqual(HumanHexCompare(s, s), 0);
   repeat
-    i := Random32(length(s)) + 1;
+    i := rnd.Next(length(s)) + 1;
     delete(s, i, 1);
     Check(TrimGuid(s) = (length(s) = 32));
   until s = '';
@@ -2860,14 +2927,21 @@ begin
   CheckEqual(s, '1234678');
   for i := 1 to 1000 do
   begin
-    RandomGuid(g);
+    if i and 1 = 0 then
+      RandomGuid(g)
+    else
+      TAesPrng.Main.FillGuid(g);
+    Check(IsRandomGuid(@g));
     st := GuidToString(g);
+    Check(st <> st2);
     st2 := SysUtils.GuidToString(g);
     Check(st = st2);
     Check(IsEqualGuid(StringToGuid(st), g));
     s := GuidToRawUtf8(g);
+    Check(s[16] = '4');
+    Check(s[21] in ['8', '9', 'A', 'B']);
     Check(st = mormot.core.unicode.Utf8ToString(s));
-    st[Random32(38) + 1] := ' ';
+    st[rnd.Next(38) + 1] := ' ';
     g2 := StringToGuid(st);
     Check(IsZero(@g2, SizeOf(g2)));
     Check(TextToGuid(@s[2], @g2)^ = '}');
@@ -2888,7 +2962,7 @@ begin
   FillCharFast(h, SizeOf(h), 1);
   for pt := ptGuid to ptHash512 do
   begin
-    RandomBytes(@h, PT_SIZE[pt]);
+    rnd.Fill(@h, PT_SIZE[pt]);
     s := SaveJson(h, PT_INFO[pt]); // ptHash* are not record types
     CheckUtf8(TextToVariantNumberType(pointer(s)) = varString,
       '%:%', [PT_INFO[pt].RawName, s]);
@@ -4296,7 +4370,7 @@ begin
   SetLength(i32, 100000);
   n := 10;
   repeat
-    RandomBytes(pointer(i32), n * 4);
+    rnd.Fill(pointer(i32), n * 4);
     timer.Start;
     QuickSortInteger(pointer(i32), 0, n - 1);
     NotifyTestSpeed('QuickSortInteger', n, 0, @timer, {onlylog=}true);
@@ -4844,7 +4918,7 @@ begin
   for i := 0 to 10000 do
   begin
     j := i shr 6; // circumvent weird FPC code generation bug in -O2 mode
-    s := RandomAnsi7(j);
+    rnd.FillAscii(j, s);
     CheckHash(s, Hash32Reference(pointer(s), length(s)));
     Check(kr32(0, pointer(s), length(s)) = kr32reference(pointer(s), length(s)));
     Check(fnv32(0, pointer(s), length(s)) = fnv32reference(0, pointer(s), length(s)));
@@ -4855,7 +4929,7 @@ begin
       Check(xxhash32(0, pointer(s), length(s)) = xxHash32reference(pointer(s),
         length(s)));
     if i <> 0 then
-      j := Random32; // always validate j=0 value
+      j := rnd.Next; // always validate j=0 value
     str(j, a);
     s := RawUtf8(a);
     u := string(a);
@@ -4898,8 +4972,8 @@ begin
     CheckEqual(FormatJson('? %', [vj], [vj]), s + ' ' + s);
     CheckEqual(FormatJson(' ?? ', [], [vs]), ' "' + s + '" ');
     CheckEqual(FormatJson('? %', [vs], [vj]), s + ' ' + s);
-    k := Int64(j) * Random32(MaxInt);
-    b := Random32(64);
+    k := Int64(j) * rnd.Next(MaxInt);
+    b := rnd.Next(64);
     s := GetBitCsv(k, b);
     l := 0;
     P := pointer(s);
@@ -4991,7 +5065,7 @@ begin
       9993:
         d := 1E-210;
     else
-      d := RandomDouble * 1E-17 - RandomDouble * 1E-19;
+      d := rnd.NextDouble * 1E-17 - rnd.NextDouble * 1E-19;
     end;
     str(d, a);
     s := RawUtf8(a);
@@ -5127,11 +5201,11 @@ begin
   exit; // code below is speed informative only, without any test
   Timer.Start;
   for i := 0 to 99999 do
-    SysUtils.IntToStr(Int64(7777) * Random32);
+    SysUtils.IntToStr(Int64(7777) * rnd.Next);
   NotifyTestSpeed('SysUtils.IntToStr', 100000, 0, @Timer);
   Timer.Start;
   for i := 0 to 99999 do
-    StrInt64(@varint[31], Int64(7777) * Random32);
+    StrInt64(@varint[31], Int64(7777) * rnd.Next);
   NotifyTestSpeed('StrInt64', 100000, 0, @Timer);
 end;
 
@@ -5191,7 +5265,7 @@ begin
     for k := 1 to 50 do
     begin
       for j := 0 to i - 1 do
-        P[j] := CHR[Random32(83)];
+        P[j] := CHR[rnd.Next(83)];
       b := AsciiToBaudot(u);
       check(BaudotToAscii(b) = u);
     end;
@@ -5263,7 +5337,7 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
   begin
     C := TSynAnsiConvert.Engine(CP);
     CheckEqual(C.CodePage, CP, 'cpa');
-    U := C.AnsiToUtf8(W);
+    C.AnsiToUtf8(W, U);
     A := C.Utf8ToAnsi(U);
     if W = '' then
       exit;
@@ -5294,7 +5368,7 @@ var
   str: string;
   ss: ShortString;
   up4: RawUcs4;
-  U, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
+  U, U1, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
   arr, arr2: TRawUtf8DynArray;
   P: PUtf8Char;
   PB: PByte;
@@ -6067,11 +6141,13 @@ begin
     CheckEqual(json2, json, 'jeu2');
     Unic := Utf8DecodeToUnicodeRawByteString(U);
     CheckEqual(Utf8ToWinAnsi(U), W);
-    CheckEqual(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)), W);
+    WinAnsiConvert.AnsiToUtf8(W, U1);
+    CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W);
     CheckEqual(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)), W);
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
-      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(CurrentAnsiConvert.AnsiToUtf8(W)), W);
+      CurrentAnsiConvert.AnsiToUtf8(W, U1);
+      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(U1), W);
       CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)), W);
     end;
     res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
@@ -6171,6 +6247,9 @@ begin
     check(PosChar(pointer(U2), #0) = nil);
     check(PosChar(pointer(U2), #1) = nil);
     check(PosChar(pointer(U2), #10) = @U2[length(U2)]);
+    check(PosCharU(U2, #0) = nil);
+    check(PosCharU(U2, #1) = nil);
+    check(PosCharU(U2, #10) = @U2[length(U2)]);
     if U = '' then
       continue;
     U2 := QuotedStr(U, '"');
@@ -6259,7 +6338,7 @@ begin
   rb1 := '';
   rb1 := eng.Utf8ToAnsi(U);
   CheckEqual(length(rb1), 7);
-  U2 := eng.AnsiToUtf8(rb1);
+  eng.AnsiToUtf8(rb1, U2);
   CheckEqual(U, U2);
   eng := TSynAnsiConvert.Engine(54936);
   Check(eng <> nil, 'Engine(54936)');
@@ -6272,7 +6351,7 @@ begin
     rb1 := '';
     rb1 := eng.Utf8ToAnsi(U);
     CheckEqual(length(rb1), 7, 'cp54936c');
-    U2 := eng.AnsiToUtf8(rb1);
+    eng.AnsiToUtf8(rb1, U2);
     CheckEqual(U, U2, 'cp54936d');
     {$ifdef HASCODEPAGE}
     rb2 := U;
@@ -6292,7 +6371,7 @@ begin
     Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
     RB2 := eng.UnicodeStringToAnsi(SU);
     Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
-    U2 := eng.AnsiToUtf8(RB1);
+    eng.AnsiToUtf8(RB1, U2);
     CheckEqual(U2, U, 'AnsiToUtf8');
   end;
   CheckEqual(CodePageToText(CP_UTF8), 'utf8');
@@ -6654,11 +6733,11 @@ procedure TTestCoreBase.Charsets;
     eng := TSynAnsiConvert.Engine(cp); // validate "last" cache
     Check(eng <> nil, 'eng3');
     CheckEqual(eng.CodePage, cp, 'eng4');
-    u2 := eng.AnsiToUtf8(a);
+    eng.AnsiToUtf8(a, u2);
     Check(u2 = ru, msg);
     a2 := eng.UnicodeStringToAnsi(su);
     CheckEqual(a2, a, name);
-    u := eng.AnsiToUtf8(ra);
+    eng.AnsiToUtf8(ra, u);
     CheckEqual(u, ru, name);
   end;
 
@@ -7176,13 +7255,19 @@ procedure TTestCoreBase.Iso8601DateAndTime;
       Check(true);
     J.From(E);
     Check(Int64(I) = Int64(J));
-    s := TimeToIso8601(D, Expanded);
+    s := TimeToIso8601(D, Expanded); // e.g. 'T23:36:34'
     Check(PosEx('.', s) = 0);
     Check(abs(frac(D) - Iso8601ToDateTime(s)) < 1 / SecsPerDay);
-    s := TimeToIso8601(D, Expanded, 'T', true);
+    s := TimeToIso8601(D, Expanded, 'T', true); // 'T23:36:34.715'
     Check(PosEx('.', s) > 0);
     F := Iso8601ToDateTime(s);
     Check(abs(frac(D) - F) < 1 / MSecsPerDay, 'withms1');
+    if expanded then
+    begin
+      delete(s, 1, 1); // '23:36:34.715'
+      F := Iso8601ToDateTime(s);
+      Check(abs(frac(D) - F) < 1 / MSecsPerDay, 'withmsNoT');
+    end;
     s := DateToIso8601(D, Expanded);
     Check(trunc(D) = trunc(Iso8601ToDateTime(s)));
     Check(Abs(D - I.ToDateTime) < (1 / SecsPerDay));
@@ -7277,12 +7362,12 @@ begin
   for i := 1700 to 2500 do
     Check(mormot.core.datetime.IsLeapYear(i) = SysUtils.IsLeapYear(i), 'IsLeapYear');
   // this will test typically from year 1905 to 2065
-  D := Now / 20 + RandomDouble * 20; // some starting random date/time
+  D := Now / 20 + rnd.NextDouble * 20; // some starting random date/time
   for i := 1 to 2000 do
   begin
     Test(D, true);
     Test(D, false);
-    D := D + RandomDouble * 57; // go further a little bit: change date/time
+    D := D + rnd.NextDouble * 57; // go further a little bit: change date/time
   end;
   b.Value := Iso8601ToTimeLog('20150504');
   Check(b.Year = 2015);
@@ -7370,6 +7455,7 @@ var
   buf: RawByteString;
   dt: TDateTime;
   local: TDateTime;
+  s31: TShort31;
 
   procedure testBias(year, expected: integer);
   begin
@@ -7431,8 +7517,8 @@ begin
   dt := HttpDateToDateTime('Sun, 06 Nov 1994 08:49:37 GMT');
   CheckEqual(DateTimeToIso8601Text(dt), '1994-11-06T08:49:37');
   CheckEqual(DateTimeToHttpDate(dt), 'Sun, 06 Nov 1994 08:49:37 GMT');
-  Check(UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt)) =
-    'Sun, 06 Nov 1994 08:49:37 GMT');
+  UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt), s31);
+  Check(s31 = 'Sun, 06 Nov 1994 08:49:37 GMT', 'UnixMSTimeUtcToHttpDate');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Sunday, 06-DEC-94 08:49:37 UTC')), '1994-12-06T08:49:37');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
@@ -8769,7 +8855,7 @@ var
 begin
   for i := 1 to 100 do
   begin
-    s := DateTimeToIso8601(Now / 20 + RandomDouble * 20, true);
+    s := DateTimeToIso8601(Now / 20 + rnd.NextDouble * 20, true);
     t := UrlEncode(s);
     CheckEqual(UrlDecode(t), s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
@@ -8893,7 +8979,7 @@ begin
   Check(not IsHttpUserAgentBot(
     'Mozilla/5.0 (Windows NT 10.0; Trident/7.0; rv:11.0) like Gecko'));
   Check(not IsHttpUserAgentBot(DefaultUserAgent(self)),
-    'Mozilla/5.0 (Linux x64; mORMot) TCB/2 mormot2tests');
+    'Mozilla/5.0 (Linux x64; mORMot) TCB/3 mormot2tests');
   Check(IsHttpUserAgentBot(
     'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ' +
     'Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot) ' +
@@ -9216,7 +9302,7 @@ begin
     Check(fQuickSelectValues[med1] = n + 1);
     Check(MedianQuickSelectInteger(P, len) = n + 1);
     for i := 0 to high(fQuickSelectValues) do
-      fQuickSelectValues[i] := Random32(MaxInt);
+      fQuickSelectValues[i] := rnd.Next31;
     med1 := fQuickSelectValues[MedianQuickSelect(QuickSelectGT, len, tmp)];
     med2 := MedianQuickSelectInteger(P, len);
     Check(med1 = med2);
@@ -9696,8 +9782,9 @@ const
   MAX = 10000;
 var
   dict: TSynDictionary;
+  rnd: TLecuyer; // local per-thread instance
 
-  procedure TestSpeed(Count: integer; SetCapacity, DoGuidText: boolean;
+  procedure TestSpeed(Count: integer; SetCapacity, DoText: boolean;
     Hasher: THasher; const Msg: RawUtf8);
   var
     timer: TPrecisionTimer;
@@ -9713,13 +9800,13 @@ var
     SetLength(r, Count);
     for i := 0 to High(a) do // pre-computed values and indexes for fairness
     begin
-      v := Random32(Count shr 2) shl 2; // realistic 25% coverage
+      v := rnd.Next(Count shr 2) shl 2; // realistic 25% coverage
       Check(v < Count, 'random32 overflow');
       r[i] := v;
-      if DoGuidText then
-        a[i] := GuidToRawUtf8(RandomGuid)
+      if DoText then
+        rnd.FillAscii(38, a[i])
       else
-        a[i] := UInt32ToUtf8(i);
+        UInt32ToUtf8(i, a[i]);
     end;
     dic := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
       TypeInfo(TIntegerDynArray), false, 0, nil, Hasher);
@@ -9792,6 +9879,7 @@ var
   b: byte;
   sdk: TSDKey;
 begin
+  RandomLecuyer(rnd); // local per-thread generator
   SetDict;
   try
     CheckEqual(dict.Count, 0);

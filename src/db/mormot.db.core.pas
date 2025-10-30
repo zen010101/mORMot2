@@ -85,7 +85,7 @@ type
 
   /// handled field/parameter/column types for abstract database access
   // - this will map JSON-compatible low-level database-level access types, not
-  // high-level object pascal types as TOrmFieldType defined in
+  // high-level Object Pascal types as TOrmFieldType defined in
   // mormot.orm.core.pas
   // - it does not map either all potential types as defined in DB.pas (which
   // are there for compatibility with old RDBMS, and are not abstract enough)
@@ -862,7 +862,7 @@ type
   end;
 
 /// returns a 64-bit value as inlined ':(1234):' text
-function InlineParameter(ID: Int64): ShortString; overload;
+function InlineParameter(ID: Int64): TShort31; overload;
 
 /// returns a string value as inlined ':("value"):' text
 function InlineParameter(const value: RawUtf8): RawUtf8; overload;
@@ -2009,7 +2009,7 @@ end;
 
 procedure TLastError.SetCapacity(max: integer);
 begin
-  max := NextPowerOfTwo(MinPtrUInt(max, 1024));
+  max := NextPowerOfTwo(MinPtrUInt(1024, max));
   SetLength(Seq, max);
   SetLength(Msg, max);
   CurrentIndex := 0;
@@ -2388,9 +2388,9 @@ end;
 
 { ************ SQL Parameters Inlining and Processing }
 
-function InlineParameter(ID: Int64): ShortString;
+function InlineParameter(ID: Int64): TShort31;
 begin
-  FormatShort(':(%):', [ID], result);
+  FormatShort31(':(%):', [ID], result);
 end;
 
 function InlineParameter(const value: RawUtf8): RawUtf8;
@@ -2658,9 +2658,9 @@ begin
     while Sql[i] in [#1 .. ' '] do
       inc(i); // trim left
     result := copy(Sql, i, maxInt);
-    P := PosChar(pointer(result), ' ');
+    P := PosCharU(result, ' ');
     if P = nil then
-      P := PosChar(pointer(result), ';');
+      P := PosCharU(result, ';');
     if P <> nil then
       FakeLength(result, P - pointer(result)); // trim right
   end;
@@ -2801,7 +2801,7 @@ begin
     if p^ <> ',' then
       exit; // reached last table name
     inc(n);
-    p := GotoNextNotSpace(p + 1);
+    p := IgnoreAndGotoNextNotSpace(p);
   until false;
   result := nil;
 end;
@@ -3207,7 +3207,7 @@ var
     begin
       if P^ <> '(' then // Field not found -> try function(field)
         exit;
-      P := GotoNextNotSpace(P + 1);
+      P := IgnoreAndGotoNextNotSpace(P);
       select.FunctionName := prop;
       inc(fSelectFunctionCount);
       if PropNameEquals(prop, 'COUNT') and
@@ -3215,7 +3215,7 @@ var
       begin
         select.Field := 0; // count( * ) -> count(ID)
         select.FunctionKnown := funcCountStar;
-        P := GotoNextNotSpace(P + 1);
+        P := IgnoreAndGotoNextNotSpace(P);
       end
       else
       begin
@@ -3229,7 +3229,7 @@ var
       end;
       if P^ <> ')' then
         exit;
-      P := GotoNextNotSpace(P + 1);
+      P := IgnoreAndGotoNextNotSpace(P);
     end
     else if P^ = '.' then
     begin
@@ -3576,7 +3576,7 @@ begin
             else if P^ <> ',' then
               break
             else
-              P := GotoNextNotSpace(P + 1);
+              P := IgnoreAndGotoNextNotSpace(P);
             if (P^ = ')') or
                (GetWhereValue(fWhere[whereCount]) and
                 (P^ = ')')) then
@@ -3639,7 +3639,7 @@ lim2: case IdemPCharSep(pointer(prop), 'LIMIT|OFFSET|ORDER|GROUP|') of
                   if P^ <> ',' then
                     break; // no more fields in this ORDER BY clause
                 end;
-                P := GotoNextNotSpace(P + 1);
+                P := IgnoreAndGotoNextNotSpace(P);
               until P^ in [#0, ';'];
             end
             else
@@ -3658,7 +3658,7 @@ lim2: case IdemPCharSep(pointer(prop), 'LIMIT|OFFSET|ORDER|GROUP|') of
                 AddFieldIndex(fGroupByField, ndx);
                 if P^ <> ',' then
                   break;
-                P := GotoNextNotSpace(P + 1);
+                P := IgnoreAndGotoNextNotSpace(P);
               until P^ in [#0, ';'];
             end
             else

@@ -37,6 +37,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.buffers,
+  mormot.core.interfaces,
   mormot.crypt.core,
   mormot.crypt.ecc,
   mormot.crypt.jwt,
@@ -178,6 +179,8 @@ type
     // - GetTickCount64 resolution is around 16ms on Windows and 4ms on Linux,
     // so default 10 (ms) value seems fine for a cross-platform similar behavior
     // (resulting in a <16ms period on Windows, and <12ms period on Linux)
+    // - setting 0 will disable any frame gathering (may be used on a loopback
+    // or a local network for very low latency - not useful on the Internet)
     SendDelay: cardinal;
     /// will close the connection after a given number of invalid Heartbeat sent
     // - when a Hearbeat is failed to be transmitted, the class will start
@@ -630,12 +633,6 @@ type
     wspAnswer,
     wspError,
     wspClosed);
-
-  /// indicates how TWebSocketProcess.NotifyCallback() will work
-  TWebSocketProcessNotifyCallback = (
-    wscBlockWithAnswer,
-    wscBlockWithoutAnswer,
-    wscNonBlockWithoutAnswer);
 
   /// used to manage a thread-safe list of WebSockets frames
   // - TSynLocked because SendPendingOutgoingFrames() locks it and may take time
@@ -1252,8 +1249,9 @@ type
   TSocketIORemoteNamespace = class(TSocketIONamespace)
   protected
     fSid, fHandshakeData: RawUtf8;
-    fAckIdCursor: TSocketIOAckID;
+    fCallbackSafe: TLightLock;
     fCallbacks: array of TSocketIOCallback;
+    fAckIdCursor: TSocketIOAckID;
     /// Generate a new event acknowledgment ID, incrementing the internal cursor
     function GenerateAckId(const aOnAck: TOnSocketIOAck): TSocketIOAckID;
   public
@@ -1271,6 +1269,12 @@ type
     /// handle an acknowledge message and call the associated callback
     // - will raise an ESocketIO if the packet is invalid or ID was not found
     procedure Acknowledge(const aMessage: TSocketIOMessage);
+    /// disable a callback for a given packet ID
+    // - e.g. when a form is called and we don't need any notification any more
+    function Discard(aAckID: TSocketIOAckID): boolean; overload;
+    /// disable a given callback from any packet ID redirecting to it
+    // - e.g. when a form is called and we don't need any notification any more
+    function Discard(const aOnAck: TOnSocketIOAck): boolean; overload;
     /// low-level associated JSON array data supplied to Connect()
     property HandshakeData: RawUtf8
       read fHandshakeData write fHandshakeData;
@@ -1444,12 +1448,12 @@ const
   // see https://tools.ietf.org/html/rfc6455
   SALT: string[36] = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 var
-  SHA: TSha1;
+  sha1: TSha1;
 begin
-  SHA.Init;
-  SHA.Update(pointer(Base64), length(Base64));
-  SHA.Update(@SALT[1], 36);
-  SHA.Final(Digest);
+  sha1.Init;
+  sha1.Update(pointer(Base64), length(Base64));
+  sha1.Update(@SALT[1], 36);
+  sha1.Final(Digest);
 end;
 
 procedure ProcessMask(data: PCardinalArray; mask: PtrUInt; len: PtrInt);
@@ -1945,7 +1949,8 @@ begin
   end
   else
     head := 'request';
-  FrameCompress(head, [RawUtf8(Method), Ctxt.Url, Ctxt.InHeaders, ord(aNoAnswer)],
+  FrameCompress(head,
+    [RawUtf8(Method), Ctxt.Url, Ctxt.InHeaders, ord(aNoAnswer)],
     Ctxt.InContent, RawUtf8(InContentType), request);
   if fSequencing then
     // 'r000001' -> 'a000001'
@@ -2769,7 +2774,7 @@ var
   uri, version, prot, subprot, key, extin, extout, protout: RawUtf8;
   extins: TRawUtf8DynArray;
   P: PUtf8Char;
-  Digest: TSha1Digest;
+  dig: TSha1Digest;
 begin
   // validate WebSockets protocol upgrade request
   Protocol := nil;
@@ -2847,12 +2852,12 @@ begin
     if not Protocol.ProcessHandshake(extins, extout, nil) then
     begin
       Protocol.Free;
-      result := HTTP_NOTACCEPTABLE;
+      result := HTTP_NOTACCEPTABLE; // 406
       exit;
     end;
   end;
   // return the 101 header and switch protocols
-  ComputeChallenge(key, Digest);
+  ComputeChallenge(key, dig);
   if {%H-}extout <> '' then
     extout := Join(['Sec-WebSocket-Extensions: ', extout, #13#10]);
   FormatUtf8('HTTP/1.1 101 Switching Protocols'#13#10 +
@@ -2860,11 +2865,12 @@ begin
              'Connection: Upgrade'#13#10 +
              'Sec-WebSocket-Connection-ID: %'#13#10 +
              '%' +
-             '%Sec-WebSocket-Accept: %'#13#10#13#10,
+             '%' +
+             'Sec-WebSocket-Accept: %'#13#10#13#10,
     [ConnectionID,
      protout,
      extout,
-     BinToBase64Short(@Digest, SizeOf(Digest))], Response);
+     BinToBase64Short(@dig, SizeOf(dig))], Response);
   result := HTTP_SUCCESS;
   // on connection upgrade, will never be back to plain HTTP/1.1
 end;
@@ -3254,10 +3260,14 @@ begin
     result := fProtocol.fRemoteIP;
 end;
 
+const
+   WSC_TXT: array[TWebSocketProcessNotifyCallback] of AnsiChar = ('B', 'W', 'N');
+
 function TWebSocketProcess.NotifyCallback(aRequest: THttpServerRequestAbstract;
   aMode: TWebSocketProcessNotifyCallback): cardinal;
 var
   request, answer: TWebSocketFrame;
+  bak: PUtf8Char;
   i: integer;
   start, max, tix: Int64;
   head: RawUtf8;
@@ -3268,22 +3278,33 @@ begin
      not fProtocol.InheritsFrom(TWebSocketProtocolRest) then
     exit;
   if WebSocketLog <> nil then
-    WebSocketLog.Add.Log(sllTrace, 'NotifyCallback(%,%)',
-      [aRequest.Url, _TWebSocketProcessNotifyCallback[aMode]^], self);
+  begin
+    bak := PosCharU(aRequest.Url, '?');
+    if bak <> nil then
+      bak^ := #0;  // truncate URI before query parameters
+    WebSocketLog.Add.Log(sllTrace,
+      'NotifyCallback(%,%)', [aRequest.Url, WSC_TXT[aMode]], self);
+    if bak <> nil then
+      bak^ := '?'; // restore
+  end;
   TWebSocketProtocolRest(fProtocol).InputToFrame(aRequest,
     aMode in [wscBlockWithoutAnswer, wscNonBlockWithoutAnswer], request, head);
   case aMode of
     wscNonBlockWithoutAnswer:
+      if fSettings.SendDelay <> 0 then
       begin
         // add to the internal sending list for asynchronous sending
         SendFrameAsync(request); // with potential jumboframes gathering
         result := HTTP_SUCCESS;
         exit;
-      end;
+      end
+      else
+        // frame gathering and delayed output has been disabled with SendDelay=0
+        aMode := wscBlockWithoutAnswer;
     wscBlockWithAnswer:
-      // need to block until all previous answers are received
       if fIncoming.AnswerToIgnore > 0 then
       begin
+        // need to block until all previous answers are received
         WebSocketLog.Add.Log(sllDebug,
           'NotifyCallback: Waiting for AnswerToIgnore=%',
           [fIncoming.AnswerToIgnore], self);
@@ -3319,7 +3340,7 @@ begin
       exit;
     if aMode = wscBlockWithoutAnswer then
     begin
-      result := HTTP_SUCCESS;
+      result := HTTP_SUCCESS; // no need to wait for the answer
       exit;
     end;
     tix := GetTickCount64;
@@ -3902,9 +3923,11 @@ end;
 
 function TSocketIOLocalNamespace.RegisterEvent(const aEventName: RawUtf8;
   const aCallback: TOnSocketIOEvent): TSocketIOLocalNamespace;
+var
+  h: PEventHandler;
 begin
-  PEventHandler(fHandlers.AddUniqueName(aEventName,
-     'Duplicated event name %', [aEventName]))^.OnEvent := aCallback;
+  h := fHandlers.AddUniqueName(aEventName, 'Duplicated h name %', [aEventName]);
+  h^.OnEvent := aCallback;
   result := self;
 end;
 
@@ -3912,24 +3935,28 @@ procedure TSocketIOLocalNamespace.RegisterPublishedMethods(aInstance: TObject);
 var
   met: TPublishedMethodInfoDynArray;
   m: PtrInt;
+  h: PEventHandler;
 begin
   for m := 0 to GetPublishedMethods(aInstance, met) - 1 do
-    PEventHandler(fHandlers.AddUniqueName(met[m].Name,
-       'Duplicated event name % on %', [met[m].Name, aInstance]))^.
-      OnMethod := TOnSocketIOMethod(met[m].Method);
+  begin
+    h := fHandlers.AddUniqueName(met[m].Name,
+       'Duplicated h name % on %', [met[m].Name, aInstance]);
+    h^.OnMethod := TOnSocketIOMethod(met[m].Method);
+  end;
 end;
 
 procedure TSocketIOLocalNamespace.RegisterFrom(aAnother: TSocketIOLocalNamespace);
 var
   i: integer;
-  s: PEventHandler;
+  s, d: PEventHandler;
 begin
   if aAnother = nil then
     exit;
   s := pointer(aAnother.fHandler);
   for i := 1 to length(aAnother.fHandler) do
   begin
-    PEventHandler(fHandlers.AddUniqueName(s^.Name))^ := s^;
+    d := fHandlers.AddUniqueName(s^.Name);
+    d^ := s^;
     inc(s);
   end;
 end;
@@ -4038,16 +4065,25 @@ var
   cb: PSocketIOCallback;
   n: PtrInt;
 begin
-  result := InterlockedIncrement(fAckIdCursor);
-  n := Length(fCallbacks);
-  cb := SocketIOCallbackSearch(pointer(fCallbacks), n, SIO_NO_ACK); // search any void
-  if cb = nil then
-  begin
-    SetLength(fCallbacks, NextGrow(n)); // no void slot: allocate some new ones
-    cb := @fCallbacks[n];
+  result := SIO_NO_ACK;
+  if not Assigned(aOnAck) then
+    exit;
+  fCallbackSafe.Lock;
+  try
+    inc(fAckIdCursor);
+    result := fAckIdCursor;
+    n := Length(fCallbacks);
+    cb := SocketIOCallbackSearch(pointer(fCallbacks), n, SIO_NO_ACK); // any void
+    if cb = nil then
+    begin
+      SetLength(fCallbacks, NextGrow(n)); // no void slot: allocate some new ones
+      cb := @fCallbacks[n];
+    end;
+    cb^.Ack := result;
+    cb^.OnAck := aOnAck;
+  finally
+    fCallbackSafe.UnLock;
   end;
-  cb^.Ack := result;
-  cb^.OnAck := aOnAck;
   result := result;
 end;
 
@@ -4080,6 +4116,7 @@ end;
 procedure TSocketIORemoteNamespace.Acknowledge(const aMessage: TSocketIOMessage);
 var
   cb: PSocketIOCallback;
+  ack: TOnSocketIOAck;
 begin
   // validate message
   if not aMessage.NameSpaceIs(fNameSpace) then
@@ -4091,14 +4128,72 @@ begin
       'acknowledgment message for namespace %',
       [self, ToText(aMessage.PacketType)^, aMessage.ID, fNameSpace]);
   // search for the registered callback
-  cb := SocketIOCallbackSearch(pointer(fCallbacks), length(fCallbacks), aMessage.ID);
-  if cb = nil then
-    ESocketIO.RaiseUtf8('%.Acknowledge: callback for message ID % not found ' +
-      '(may already have been consumed) for namespace %',
-        [self, aMessage.ID, fNameSpace]);
-  // call the registered callback and remove it from the callback list
-  cb^.OnAck(aMessage);
-  cb^.Ack := SIO_NO_ACK; // O(1) void the slot - to be reused for the next ack
+  fCallbackSafe.Lock;
+  try
+    cb := SocketIOCallbackSearch(pointer(fCallbacks), length(fCallbacks), aMessage.ID);
+    if cb = nil then
+      ESocketIO.RaiseUtf8('%.Acknowledge: callback for message ID % not found ' +
+        '(may already have been consumed) for namespace %',
+          [self, aMessage.ID, fNameSpace]);
+    ack := cb^.OnAck;      // execute callback outside of the lock
+    cb^.Ack := SIO_NO_ACK; // O(1) void the slot - to be reused for the next ack
+  finally
+    fCallbackSafe.UnLock;
+  end;
+  // call the registered callback
+  if Assigned(ack) then // if was not discarded
+    ack(aMessage);
+end;
+
+function TSocketIORemoteNamespace.Discard(aAckID: TSocketIOAckID): boolean;
+var
+  cb: PSocketIOCallback;
+begin
+  result := false;
+  if self = nil then
+    exit;
+  fCallbackSafe.Lock;
+  try
+    cb := SocketIOCallbackSearch(pointer(fCallbacks), length(fCallbacks), aAckID);
+    if (cb = nil) or
+       not Assigned(cb^.OnAck) then
+      exit;
+    cb^.OnAck := nil; // Acknowledge() will just ignore this event
+    result := true;
+  finally
+    fCallbackSafe.UnLock;
+  end;
+end;
+
+function TSocketIORemoteNamespace.Discard(const aOnAck: TOnSocketIOAck): boolean;
+var
+  n: integer;
+  cb: PSocketIOCallback;
+begin
+  result := false;
+  if self = nil then
+    exit;
+  fCallbackSafe.Lock;
+  try
+    cb := pointer(fCallbacks);
+    if (cb = nil) or
+       not Assigned(aOnAck) then
+      exit;
+    n := PDALen(PAnsiChar(cb) - _DALEN)^ + _DAOFF;
+    repeat
+      if (cb^.Ack <> SIO_NO_ACK) and
+         (TMethod(cb^.OnAck).Code = TMethod(aOnAck).Code) and
+         (TMethod(cb^.OnAck).Data = TMethod(aOnAck).Data) then
+      begin
+        cb^.OnAck := nil; // Acknowledge() will just ignore this event
+        result := true;   // the same callback may be used for several events
+      end;
+      inc(cb);
+      dec(n);
+    until n = 0;
+  finally
+    fCallbackSafe.UnLock;
+  end;
 end;
 
 

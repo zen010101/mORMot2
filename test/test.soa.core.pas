@@ -83,7 +83,8 @@ type
     csUndefined, csDirect, csServer,
     csMainThread, csBackground, csJsonObject, csSessions, csLocked,
     csCrc32, csCrc32c, csXxHash, csMd5, csSha1, csSha256, csSha512, csSha3,
-    csWeak, csBasic, csDbLog, csJsonRpc, csHttp, csHttpLog, csCustomRtti);
+    csWeak, csBasic, csDbLog, csJsonRpc, csHttp, csHttpLog, csHttpBearer,
+    csCustomRtti);
 
   /// a test interface, used by TTestServiceOrientedArchitecture
   // - to test basic and high-level remote service calls
@@ -280,7 +281,7 @@ type
   protected
     fMain: TRestClientDBNamed;
     procedure Test(const Inst: TTestServiceInstances; Iterations: Cardinal = 700);
-    procedure TestHttp(aClient: TRestClientDBNamed; withlog: boolean; const port: RawUtf8);
+    procedure TestHttp(aClient: TRestClientDBNamed; const port: RawUtf8);
     procedure ClientTest(aClient: TRestClientDBNamed; aRouting: TRestServerUriContextClass;
       aAsJsonObject: boolean; aRunInOtherThread: boolean = false;
       aOptions: TInterfaceMethodOptions = []);
@@ -630,7 +631,8 @@ begin
       {$endif OSANDROID}
     csBackground,
     csHttp,
-    csHttpLog:
+    csHttpLog,
+    csHttpBearer:
       if thrid = PtrUInt(MainThreadID) then
         ESynException.RaiseUtf8('% shall NOT be in main thread', [name^])
       else if ServiceRunningContext.RunningThread = nil then
@@ -1127,8 +1129,16 @@ begin
       '{one:1,two=2}', HTTP_BADREQUEST), '');
     CheckEqual(Ask(result, 'Add', '1,2', 'n1=1&n2=2',
       '{n1:1,n2:2}', HTTP_SUCCESS), '3');
-    CheckEqual(Ask(result, 'Add', '1,0', 'n2=1',
-      '{n2:1}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '1,2', 'n2=2&n1=1',
+      '{n2:2,n1:1}', HTTP_SUCCESS), '3');
+    CheckEqual(Ask(result, 'Add', '1,0', 'n1=1',
+      '{n1:1}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '1,0', 'dummy=10&n2=1',
+      '{dummy:10,n2:1}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '1,0', 'dummy=10&n2=1&dummy2=2',
+      '{dummy:10,n2:1,dummy2:2}', HTTP_SUCCESS), '1');
+    CheckEqual(Ask(result, 'Add', '0,0', 'n2=0',
+      'null', HTTP_SUCCESS), '0');
     CheckEqual(Ask(result, 'Multiply', '2,3', 'n1=2&n2=3',
       '{n0:"abc",n2:3,m:null,n1:2}', HTTP_SUCCESS), '6');
     CheckEqual(Ask(result, 'Subtract', '23,20', 'n2=20&n1=23',
@@ -1148,11 +1158,12 @@ end;
 
 procedure TTestServiceOrientedArchitecture.Test(
   const Inst: TTestServiceInstances; Iterations: cardinal);
+var
+  rnd: TLecuyer; // local thread-safe non blocking random generator
 
   procedure TestCalculator(const I: ICalculator);
   var
-    i1, i2: PtrInt;
-    n, t, i3: integer;
+    n, t, i1, i2, i3: integer;
     c: cardinal;
     cu: currency;
     n1, n2, s1, s2: double;
@@ -1173,12 +1184,12 @@ procedure TTestServiceOrientedArchitecture.Test(
     CheckEqual(length(strs1), 3);
     for t := 1 to Iterations do
     begin
-      i1 := Random31 - Random31;
-      i2 := Random31 - i1;
-      Check(I.Add(i1, i2) = i1 + i2);
-      Check(I.Multiply(i1, i2) = Int64(i1) * Int64(i2));
-      n1 := RandomDouble * 1E-9 - RandomDouble * 1E-8;
-      n2 := n1 * RandomDouble;
+      i1 := rnd.Next31 - rnd.Next31;
+      i2 := rnd.Next31 - i1;
+      CheckEqual(I.Add(i1, i2), integer(i1 + i2));
+      CheckEqual(I.Multiply(i1, i2), Int64(i1) * Int64(i2));
+      n1 := rnd.NextDouble * 1E-9 - rnd.NextDouble * 1E-8;
+      n2 := n1 * rnd.NextDouble;
       CheckSame(I.Subtract(n1, n2), n1 - n2);
       s1 := n1;
       s2 := n2;
@@ -1229,8 +1240,8 @@ procedure TTestServiceOrientedArchitecture.Test(
       CheckSame(n1, n2);
       Rec1.FileExtension := ''; // to avoid memory leak
     end;
-    i1 := Random32;
-    i2 := Random32;
+    i1 := rnd.RawNext;
+    i2 := rnd.RawNext;
     l1 := DocList([i1, i2]);
     I.TestDocList(l1, i1, l2); // l2:=l1 & l1:=DocList([1,2,3,i1])
     CheckEqual(l1.Json, FormatUtf8('[1,2,3,%]', [i1]));
@@ -1265,12 +1276,11 @@ procedure TTestServiceOrientedArchitecture.Test(
     for i1 := 0 to l1.Len - 1 do
       CheckEqual(l1.U[i1], s, 'RJA');
     c := 1; // within the same process, no need to push this request
+    if Inst.ClientSide in [csHttp, csHttpLog, csHttpBearer] then
+      c := 50;   // >5000 for very agressive tests
     n := 100;
-    if Inst.ClientSide in [csHttp, csHttpLog] then
-    begin
-      c := 50; // >5000 for very agressive tests
+    if Inst.ClientSide = csHttp then
       n := 1000; // generate a 600KB response (e.g. test IOCP background send)
-    end;
     repeat
       u := I.RepeatTextArray(s, n);
       t := length(u);
@@ -1304,6 +1314,7 @@ var
   Nav, Nav2: TConsultaNav;
   {$endif HASNOSTATICRTTI}
 begin
+  RandomLecuyer(rnd);
   CheckEqual(Inst.I.Add(1, 2), 3);
   Check(Inst.I.Multiply($1111333, $222266667) = $24693E8DB170B85, 'I.Mul');
   CheckEqual(Inst.I.StackIntMultiply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 3628800, 'sm1');
@@ -1314,7 +1325,7 @@ begin
   Check(Inst.I.ToTextFunc(777) = '777', '777');
   x := Inst.CT.GetCurrentThreadID;
   Check(x <> 0, 'x');
-  if not (Inst.ClientSide in [csHttp, csHttpLog]) then
+  if not (Inst.ClientSide in [csHttp, csHttpLog, csHttpBearer]) then
   begin
     y := Inst.CT.GetThreadIDAtCreation;
     Check(x = y, 'x=y');
@@ -1328,7 +1339,8 @@ begin
       Check(y = PtrUInt(MainThreadID), 'thrd1');
     csBackground,
     csHttp,
-    csHttpLog:
+    csHttpLog,
+    csHttpBearer:
       Check(y <> PtrUInt(MainThreadID), 'thrd2');
   end;
   TestCalculator(Inst.I);
@@ -1474,11 +1486,11 @@ begin
   for c := 0 to Iterations shr 2 do
   begin
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
-    n1 := RandomDouble * 1000;
+    n1 := rnd.NextDouble * 1000;
     Inst.CN.Real := n1;
     CheckSame(Inst.CN.Real, n1);
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
-    n2 := RandomDouble * 1000;
+    n2 := rnd.NextDouble * 1000;
     Inst.CN.Imaginary := n2;
     CheckSame(Inst.CN.Real, n1);
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
@@ -1508,7 +1520,8 @@ begin
         Check(w = 0);
       end;
     csHttp,
-    csHttpLog:
+    csHttpLog,
+    csHttpBearer:
       begin
         Check(z <> 0);
         Check(x <> PtrUInt(MainThreadID));
@@ -1811,6 +1824,7 @@ begin
   One(ClientSideJsonRPC,              csJsonrpc);
   One(ClientSideOverHTTP,             csHttp);
   One(ClientSideOverHTTP,             csHttplog);
+  One(ClientSideOverHTTP,             csHttpBearer);
   // wait for all multi-threaded background process to finish
   RunWait({notifyThreadCount=}false, {timeoutSec=}120, {callSynchronize=}true);
   // RTTI override could NOT be parallelized
@@ -1886,14 +1900,21 @@ end;
 procedure TTestServiceOrientedArchitecture.ClientSideOverHTTP(Sender: TObject);
 var
   c: TRestClientDBNamed absolute Sender;
+  port: integer;
 begin
-  TestHttp(c, c.ClientSide = csHttpLog,
-    UInt32ToUtf8(GetInteger(HTTP_DEFAULTPORT) + ord(c.ClientSide = csHttpLog)));
+  port := GetInteger(HTTP_DEFAULTPORT); // parallel execution on several ports
+  case c.ClientSide of
+    csHttpLog:
+      inc(port);
+    csHttpBearer:
+      inc(port, 2);
+  end;
+  TestHttp(c, UInt32ToUtf8(port));
   c.Free;
 end;
 
 procedure TTestServiceOrientedArchitecture.TestHttp(
-  aClient: TRestClientDBNamed; withlog: boolean; const port: RawUtf8);
+  aClient: TRestClientDBNamed; const port: RawUtf8);
 var
   srv: TRestHttpServer;
   clt: TRestHttpClient;
@@ -1902,6 +1923,7 @@ var
   i: integer;
   opt: TRestHttpServerOptions;
   URI: TRestServerUriDynArray;
+  timer: TPrecisionTimer;
 const
   SERVICES: array[0..4] of RawUtf8 = (
     'Calculator',
@@ -1910,17 +1932,23 @@ const
     'TestGroup',
     'TestPerThread');
 begin
+  timer.Start;
   Check(aClient.Server.ServicesRouting = TRestServerRoutingRest);
   opt := HTTPSERVER_DEFAULT_OPTIONS;
   //opt := opt + [rsoLogVerbose];
-  if withlog then
-    opt := opt + [rsoEnableLogging, rsoTelemetryCsv, rsoTelemetryJson];
+  case aClient.ClientSide of
+    csHttpLog:
+      opt := opt + [rsoEnableLogging, rsoTelemetryCsv, rsoTelemetryJson];
+    csHttpBearer:
+      aClient.Server.Options := aClient.Server.Options +
+        [rsoAuthenticationBearerHeader];
+  end;
   srv := TRestHttpServer.Create(port, [aClient.Server], '+',
     useBidirAsync, // HTTP_DEFAULT_MODE,
     8, secNone, '', '', opt);
   try
     Check(srv.HttpServer <> nil);
-    if withlog then
+    if aClient.ClientSide = csHttpLog then
     begin
       Check(srv.HttpServer.Logger <> nil);
       Check(srv.HttpServer.Logger.Settings <> nil);
@@ -1984,7 +2012,7 @@ begin
       Check(clt.ServiceRetrieveAssociated(ITestSession, URI));
       Check(length(URI) = 1);
       Test(Inst, 100);
-      NotifyProgress([aClient.Name]);
+      NotifyProgress([aClient.Name, ' ', timer.Stop]);
     finally
       Finalize(Inst);
       clt.Free;

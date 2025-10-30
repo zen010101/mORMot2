@@ -5921,7 +5921,12 @@ begin
   CheckEqual(a.Count, 4);
   CheckEqual(a.ToJson, '["0","1","2","3"]');
   for i := 0 to a.Count - 1 do
+  begin
     CheckEqual(GetInteger(pointer(a.GetItemAsText(i))), i);
+    CheckEqual(a.GetValueIndex(SmallUInt32Utf8[i]), i, 'text indexes');
+  end;
+  for i := 1 to a.Count do
+    CheckEqual(a.GetValueIndex(ToUtf8(-i)), a.Count - i, 'negative indexes');
   a.Clear;
   a.Init;
   a.AddObject(['source', 'source0', // not same order as in for loop below
@@ -6056,6 +6061,9 @@ begin
     Check(Doc.Value[0] = 'one');
     Check(Doc.Value[1] = 2);
     Check(Doc.Value[2] = 3.0);
+    Check(Doc.Value[-3] = 'one', 'negative indexes');
+    Check(Doc.Value[-2] = 2);
+    Check(Doc.Value[-1] = 3.0);
     for i := 0 to Doc.Count - 1 do
       Check(VariantCompare(Doc.Values[i], Doc.Value[i]) = 0);
   end;
@@ -6249,11 +6257,15 @@ begin
   vd := _JsonFastFloat('{"price": 0.156}').price; // 0.156 is a varCurrency here
   CheckSame(vd, 0.156);
   V1 := _Arr([]);
-  vs := 1.5;
+  vs := 1;
   _Safe(V1)^.AddItem(vs);
-  CheckEqual(VariantSaveJson(V1), '[1.5]', 'VariantSaveJson');
+  CheckEqual(VariantSaveJson(V1), '[1]', 'VariantSaveJson');
   vd := 1.7;
   _Safe(V1)^.AddItem(vd);
+  CheckEqual(VariantSaveJson(V1), '[1,1.7]');
+  _Safe(V1)^.SetValueByPath('0', 2);
+  CheckEqual(VariantSaveJson(V1), '[2,1.7]');
+  _Safe(V1)^.SetValueByPath('-2', 1.5);
   CheckEqual(VariantSaveJson(V1), '[1.5,1.7]');
   V2 := _obj(['id', 0]);
   CheckEqual(VariantSaveJson(V2), '{"id":0}');
@@ -6357,7 +6369,7 @@ begin
   CheckEqual(s, '/root?ab=1&ab2=10&d=3');
   Doc.Clear;
   CheckEqual(Doc.Count, 0);
-  p := PosChar(pointer(s), '?');
+  p := PosCharU(s, '?');
   if not CheckFailed(p <> nil) then
     Doc.InitFromUrl(p + 1, JSON_FAST);
   CheckEqual(Doc.Count, 3);
@@ -6559,6 +6571,13 @@ type
     property Value: RawUtf8
       read fValue;
   end;
+  TInheritedClass = class(TLocalClass)
+  protected
+    fAnother: integer;
+  published
+    property Another: integer
+      read fAnother;
+  end;
 
 const
   ENUMPETSTORE1_TXT: array[TEnumPetStore1] of RawUtf8 = (
@@ -6600,6 +6619,8 @@ var
   tmp, u, json: RawUtf8;
   auto: TPersistentAutoCreateFieldsTest;
   local: TLocalClass;
+  inh: TInheritedClass;
+  i64: Int64;
   int: IUnknown;
   s: TSynLogLevels;
   ps: TEnumPetStore1;
@@ -6845,12 +6866,47 @@ begin
   finally
     auto.Free;
   end;
+  CheckEqual(ClassFieldCountWithParents(TPersistent), 0);
+  CheckEqual(ClassFieldCountWithParents(TSynPersistent), 0);
+  CheckEqual(ClassFieldCountWithParents(TInterfacedPersistent), 0);
+  CheckEqual(ClassFieldCountWithParents(TLocalClass), 1);
+  CheckEqual(ClassFieldCountWithParents(TInheritedClass), 2);
+  Check(ClassFieldPropWithParents(TLocalClass, 'value')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TLocalClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TLocalClass, 'value', true) = nil);
+  Check(ClassFieldPropWithParents(TInheritedClass, 'VALUE')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TInheritedClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TInheritedClass, 'VALUE', true) = nil);
+  Check(ClassFieldPropWithParentsU(TLocalClass, 'value')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TLocalClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TLocalClass, 'value', true) = nil);
+  Check(ClassFieldPropWithParentsU(TInheritedClass, 'VALUE')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TInheritedClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TInheritedClass, 'VALUE', true) = nil);
   Check(ClassInheritsFromName(TLocalClass, 'TLocalClass'));
   Check(ClassInheritsFromName(TLocalClass, 'TInterfacedPersistent'));
   Check(ClassInheritsFromName(TLocalClass, 'TInterfacedObject'));
   Check(ClassInheritsFromName(TLocalClass, 'TObject'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TInheritedClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TLocalClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TObject'));
+  Check(ClassInheritsFromName(TLocalClass, 'TLOCALCLASS'));
+  Check(ClassInheritsFromName(TLocalClass, 'TINTERFACEDPERSISTENT'));
+  Check(ClassInheritsFromName(TLocalClass, 'TINTERFACEDOBJECT'));
+  Check(ClassInheritsFromName(TLocalClass, 'TOBJECT'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TINHERitedClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TLOCALClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TOBJECt'));
   Check(not ClassInheritsFromName(TLocalClass, 'TSynPersistent'));
   Check(not ClassInheritsFromName(TLocalClass, 'TPersistent'));
+  Check(not ClassInheritsFromName(TLocalClass, 'TInheritedClass'));
+  CheckEqual(ClassFieldNamesAllPropsAsText(TPersistent), '');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TLocalClass), 'Value');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TInheritedClass), 'Another,Value');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TPersistent, true), '');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TLocalClass, true), 'Value: RawUtf8');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TInheritedClass, true),
+    'Another: Integer; Value: RawUtf8');
   local := TLocalClass.Create;
   int := local; // will do local.Free
   local.fValue := 'test';
@@ -6880,6 +6936,25 @@ begin
   JsonForDebug(@int, u, json);
   CheckEqual(json, tmp, 'as IUnknown');
   {$endif FPC}
+  Check(not ClassFieldInt64(local, 'another', i64));
+  Check(not ClassFieldText(local, 'another', u));
+  CheckNotEqual(u, 'test');
+  Check(ClassFieldText(local, 'value', u));
+  CheckEqual(u, 'test');
+  inh := TInheritedClass.Create;
+  i64 := 1;
+  Check(ClassFieldInt64(inh, 'another', i64));
+  CheckEqual(i64, 0);
+  int := inh;
+  inh.fAnother := 10;
+  Check(ClassFieldInt64(inh, 'another', i64));
+  CheckEqual(i64, 10);
+  CheckEqual(u, 'test');
+  Check(ClassFieldText(inh, 'value', u));
+  CheckEqual(u, '');
+  inh.fValue := 'toto';
+  Check(ClassFieldText(inh, 'value', u));
+  CheckEqual(u, 'toto');
   cc := TComplexClass.Create;
   try
     CheckEqual(RawUtf8ArrayToCsv(cc.arr), '');

@@ -480,9 +480,26 @@ var
   RemoteIPLocalHostAsVoidInServers: boolean = true;
 
 
+const
+  // don't use RTTI to avoid mormot.core.rtti.pas and have better spelling
+  _NR: array[TNetResult] of TShort31 = (
+    'Ok',
+    'Retry',
+    'No Socket',
+    'Not Found',
+    'Not Implemented',
+    'Closed',
+    'Fatal Error',
+    'Unknown Error',
+    'Too Many Connections',
+    'Refused',
+    'Connect Timeout',
+    'Invalid Parameter');
+
 /// returns the plain English text of a network result
-// - e.g. ToText(nrNotFound)='Not Found'
+// - e.g. ToText(nrNotFound)='Not Found' as defined in _NR[] global constant
 function ToText(res: TNetResult): PShortString; overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// convert a WaitFor() result set into a regular TNetResult enumerate
 function NetEventsToNetResult(ev: TNetEvents): TNetResult;
@@ -1632,7 +1649,7 @@ type
     /// the server port, as integer value
     function PortInt: TNetPort;
     /// compute the root resource Address, without any URI-encoded parameter
-    // - e.g. '/category/name/10'
+    // - e.g. '/category/name/10' for '/category/name/10?param=1'
     function Root: RawUtf8;
     /// comute the root resource Address as a resource "file" name
     // - e.g. '10' for '/category/name/10?param=1'
@@ -1766,8 +1783,8 @@ function NetGetNextSpaced(var P: PUtf8Char): RawUtf8;
 /// IdemPChar() like function, to avoid linking mormot.core.text
 function NetStartWith(p, up: PUtf8Char): boolean;
 
-/// BinToBase64() like function, to avoid linking mormot.core.buffers
-// - only used for TUri.UserPasswordBase64, so is not performance sensitive
+/// BinToBase64() like function, needing mormot.core.buffers in the project
+// - calls mormot.core.os RawToBase64() - only used for TUri.UserPasswordBase64
 function NetBinToBase64(const s: RawByteString): RawUtf8;
 
 /// IsPem() like function, to avoid linking mormot.crypt.secure
@@ -2278,22 +2295,6 @@ implementation
   {$I mormot.net.sock.posix.inc}
 {$endif OSPOSIX}
 
-const
-  // don't use RTTI to avoid mormot.core.rtti.pas and have better spelling
-  _NR: array[TNetResult] of string[20] = (
-    'Ok',
-    'Retry',
-    'No Socket',
-    'Not Found',
-    'Not Implemented',
-    'Closed',
-    'Fatal Error',
-    'Unknown Error',
-    'Too Many Connections',
-    'Refused',
-    'Connect Timeout',
-    'Invalid Parameter');
-
 function NetErrorFromSystem(SystemError, AnotherNonFatal: integer): TNetResult;
 begin
   case SystemError of
@@ -2302,6 +2303,8 @@ begin
     {$ifdef OSWINDOWS}
     WSAETIMEDOUT,
     WSAEWOULDBLOCK,
+    {$else}
+    ESysEINTR,
     {$endif OSWINDOWS}
     WSAIOPENDING,
     WSAEINPROGRESS,
@@ -2365,7 +2368,7 @@ end;
 function NetEventsToNetResult(ev: TNetEvents): TNetResult;
 begin
   if ev * [neRead, neWrite] <> [] then
-    result := nrOk
+    result := nrOk // [neRead/neWrite + neClosed] returns nrOk
   else if ev = [] then
     result := nrRetry
   else if neClosed in ev then
@@ -5198,54 +5201,9 @@ begin
   FastSetString(result, S, P - S);
 end;
 
-procedure DoEncode(rp, sp, b64: PAnsiChar; len: cardinal);
-var
-  i, c, by3: cardinal;
-begin
-  by3 := len div 3;
-  for i := 1 to by3 do
-  begin
-    c := (ord(sp[0]) shl 16) or (ord(sp[1]) shl 8) or ord(sp[2]);
-    rp[0] := b64[(c shr 18) and $3f];
-    rp[1] := b64[(c shr 12) and $3f];
-    rp[2] := b64[(c shr 6) and $3f];
-    rp[3] := b64[c and $3f];
-    inc(rp, 4);
-    inc(sp, 3);
-  end;
-  case len - by3 * 3 of
-    1:
-      begin
-        c := ord(sp[0]) shl 16;
-        rp[0] := b64[(c shr 18) and $3f];
-        rp[1] := b64[(c shr 12) and $3f];
-        rp[2] := '=';
-        rp[3] := '=';
-      end;
-    2:
-      begin
-        c := (ord(sp[0]) shl 16) or ord(sp[1]) shl 8;
-        rp[0] := b64[(c shr 18) and $3f];
-        rp[1] := b64[(c shr 12) and $3f];
-        rp[2] := b64[(c shr 6) and $3f];
-        rp[3] := '=';
-      end;
-  end;
-end;
-
 function NetBinToBase64(const s: RawByteString): RawUtf8;
-const
-  b64: array[0..63] of AnsiChar =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-var
-  len: cardinal;
-begin
-  result := '';
-  len := length(s);
-  if len = 0 then
-    exit;
-  SetLength(result, ((len + 2) div 3) * 4);
-  DoEncode(pointer(result), pointer(s), @b64, len);
+begin // just redirect from mormot.core.os.pas to mormot.core.buffers.pas
+  result := RawToBase64(pointer(s), length(s), {uri=}false);
 end;
 
 function NetIsPem(p: PUtf8Char): boolean;
@@ -5595,7 +5553,7 @@ begin
     p := s + 3;
   end;
   // parse Server
-  if NetStartWith(pointer(p), 'UNIX:') then
+  if NetStartWith(pointer(p), 'UNIX:/') then
   begin
     inc(p, 5); // 'http://unix:/path/to/socket.sock:/url/path'
     Layer := nlUnix;
@@ -5711,7 +5669,7 @@ end;
 
 function TUri.Root: RawUtf8;
 begin
-  result := Split(Address, '?');
+  result := copy(Address, 1, UriTruncLen(Address)); // excludes ?params #anchor
 end;
 
 function TUri.ResourceName: RawUtf8;
@@ -6042,7 +6000,7 @@ begin
     res := NewSocket(s, fPort, aLayer, doBind, fTimeout, fTimeout, fTimeout,
                      retry, fSock, @addr, aReusePort);
     //if Assigned(OnLog) then
-    //  OnLog(sllTrace, 'After NewSocket=%', [ToText(res)^], self);
+    //  OnLog(sllTrace, 'After NewSocket=%', [_NR[res]], self);
     addr.IP(fRemoteIP, true);
     if res <> nrOK then
       DoRaise('OpenBind(%s:%s): %s [remoteip=%s]',
@@ -6220,14 +6178,17 @@ begin
 end;
 {$endif FPC}
 
-procedure DoInputSock(r: PTextRec; const ctx: ShortString);
+procedure DoInputSock(r: PTextRec; const ctx: ShortString; notvoid: boolean);
 var
   res: integer;
 begin
   res := InputSock(r^);
-  if res < 0 then
+  if res <> NO_ERROR then
     with TextRecUserData(r^)^ do
       Owner.DoRaise('%s', [ctx], LastNetResult, @LastRawError);
+  if notvoid and
+     (r^.BufEnd = r^.BufPos) then
+    TextRecUserData(r^)^.Owner.DoRaise('%s: void or timeout', [ctx]);
 end;
 
 const
@@ -6354,16 +6315,19 @@ var
   r: PTextRec;
 
   function GetSockInLineLength: PtrInt; {$ifdef FPC} inline; {$endif}
+  var
+    available: PtrInt;
   begin
     repeat
-      len := r^.BufEnd - r^.BufPos;
-      if len > 0 then
+      available := r^.BufEnd - r^.BufPos;
+      if available > 0 then
       begin
+        len := available;
         p := @r^.BufPtr[r^.BufPos];
-        result := BufferLineLength(p, p + len); // SSE2 asm on x86-64
+        result := BufferLineLength(p, p + available); // SSE2 asm on x86-64
         exit;
       end;
-      DoInputSock(r, 'SockInReadLn');
+      DoInputSock(r, 'SockInReadLn', {notvoid=}true);
     until fAborted in fFlags;
     result := 0;
   end;
@@ -6371,8 +6335,9 @@ var
 begin
   result := 0;
   r := pointer(fSockIn);
-  if r = nil then // no SockIn^ buffer -> need multiple sockets API calls
+  if r = nil then
   begin
+    // no SockIn^ buffer -> need multiple sockets API calls
     repeat
       read := 1; // one syscall per char: may be very slow on Windows
       if not TrySockRecv(@c, read, {StopBeforeLength=}false, @res, @err) then
@@ -6383,7 +6348,7 @@ begin
               continue;
             end;
           nrClosed:
-            break; // like EOF(SockIn^)
+            break; // stop at end of input stream
         else
           DoRaise('SockInReadLn: TrySockRecv(c) failed', [], res, @err);
         end
@@ -6477,19 +6442,21 @@ begin
         MoveFast(r^.BufPtr[r^.BufPos], Content^, len);
         inc(r^.BufPos, len);
         inc(Content, len);
-        dec(Length, len);
         inc(result, len);
+        dec(Length, len);
       end;
-      if (fAborted in fFlags) or
-         (Length = 0) then
+      if (Length = 0) or
+         (fAborted in fFlags) then
         exit; // we got everything we wanted
       if not UseOnlySockIn then
         break;
-      DoInputSock(r, 'SockInRead');
-      // loop until Timeout
-    until Timeout = 0;
+      if Timeout = 0 then
+        SleepHiRes(0); // don't burn 100% of CPU
+      DoInputSock(r, 'SockInRead', {notvoid=}false);
+    until fAborted in fFlags;
   // direct receiving of the remaining bytes from socket
-  if Length <= 0 then
+  if (Length <= 0) or
+     (fAborted in fFlags) then
     exit;
   SockRecv(Content, Length); // raise ENetSock if failed to read Length
   inc(result, Length);
@@ -6902,9 +6869,9 @@ begin
           end;
         nrRetry:
           begin
-            read := 0; // caller should make RecvPending/WaitFor and retry Recv
-            res := nrOk;
-          end
+            res := nrOk; // make RecvPending + WaitFor below and retry Recv
+            read := 0;
+          end;
       else
         begin
           // no more to read, or socket closed/broken

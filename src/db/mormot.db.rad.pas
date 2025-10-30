@@ -185,8 +185,8 @@ type
     fQuery: TDataSet;
     fPrepared: boolean;
     fDatasetSupportBatchBinding: boolean;
-    fPreparedParamsCount: integer;
     fForceUseWideString: boolean;
+    fPreparedParamsCount: integer;
   protected
     /// convert SqlDBParamType to a standard DB.TParamType to be used in TQuery.Param
     function SqlParamTypeToDBParamType(IO: TSqlDBParamInOutType): TParamType; virtual;
@@ -920,7 +920,7 @@ begin
         mormot.db.core.ftDate:
           begin
             W.Add('"');
-            W.AddDateTime(f.AsDateTime, fForceDateWithMS);
+            W.AddDateTime(f.AsDateTime, GetForceDateWithMS);
             W.AddDirect('"');
           end;
         mormot.db.core.ftUtf8:
@@ -939,7 +939,7 @@ begin
             W.AddDirect('"');
           end;
         mormot.db.core.ftBlob:
-          if fForceBlobAsNull then
+          if dsfForceBlobAsNull in fFlags then
             W.AddNull
           else
           begin
@@ -1014,7 +1014,7 @@ begin
             P.AsDateTime := Iso8601ToDateTime(tmp);
           end
           else
-            P.AsDateTime := PDateTime(@VInt64)^;
+            P.AsDateTime := unaligned(PDateTime(@VInt64)^);
         mormot.db.core.ftUtf8:
           if aArrayIndex >= 0 then
             if (VArray[aArrayIndex] = '') and
@@ -1076,7 +1076,7 @@ begin
     mormot.db.core.ftCurrency:
       PCurrency(@aParam.VInt64)^ := par.AsCurrency;
     mormot.db.core.ftDate:
-      PDateTime(@aParam.VInt64)^ := par.AsDateTime;
+      unaligned(PDateTime(@aParam.VInt64)^) := par.AsDateTime;
     mormot.db.core.ftUtf8:
       aParam.VData := StringToUtf8(par.AsString);
     mormot.db.core.ftBlob:

@@ -1198,13 +1198,15 @@ procedure TSynTestCase.Run(const OnTask: TNotifyEvent; Sender: TObject;
   const TaskName: RawUtf8; Threaded, NotifyTask, ForcedThreaded: boolean);
 begin
   if NotifyTask or
-     not fOwner.fMultiThread or
+     ((not fOwner.fMultiThread) and
+      (not ForcedThreaded)) or
      not Threaded then
     NotifyProgress([TaskName]);
   if not Assigned(OnTask) then
     exit;
-  if not fOwner.fMultiThread or // avoid timeout e.g. on slow VMs
-     not Threaded then
+  if ((not fOwner.fMultiThread) or // avoid timeout e.g. on slow VMs
+      (not Threaded)) and
+     not ForcedThreaded then
     OnTask(Sender) // run in main thread
   else
   begin
@@ -1337,12 +1339,13 @@ var
   i: PtrInt;
 begin
   for i := 0 to high(TestCase) do
-    PtrArrayAddOnce(fTestCaseClass, TestCase[i]);
+    AddCase(TestCase[i]);
 end;
 
 procedure TSynTests.AddCase(TestCase: TSynTestCaseClass);
 begin
-  PtrArrayAddOnce(fTestCaseClass, TestCase);
+  if TestCase <> nil then
+    PtrArrayAddOnce(fTestCaseClass, TestCase);
 end;
 
 function TSynTests.BeforeRun: IUnknown;
@@ -2063,7 +2066,8 @@ begin
   m := fInterface.CheckMethodIndex(aMethodName);
   if aScope = chkName then
     raise EInterfaceStub.Create(self, fInterface.Methods[m],
-      'Invalid scope for Verify()');
+      'Invalid scope for Verify()')
+      {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif};
   InternalCheck(
     IntGetLogAsText(m + RESERVED_VTABLE_SLOTS, '', VERIFY_SCOPE[aScope], ',') = aTrace,
     true, 'Verify(''%'',''%'',%) failed', [aMethodName, aTrace, ToText(aScope)^]);
