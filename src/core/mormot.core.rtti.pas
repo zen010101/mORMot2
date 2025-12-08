@@ -502,7 +502,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
   public
     /// specify ordinal storage size and sign
-    // - is prefered to MaxValue to identify the number of stored bytes
+    // - is preferred to MaxValue to identify the number of stored bytes
     function RttiOrd: TRttiOrd;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// first value of enumeration type, typicaly 0
@@ -3212,10 +3212,10 @@ type
     // !  map.Init(TMyClass, TypeInfo(TMyRecord)).AutoMap;
     // !  map.ToA(c, @r); // from TMyRecord to TMyClass
     // !  map.ToB(c, @r); // from TMyClass to TMyRecord
-    procedure ToA(A, B: pointer); overload;
+    procedure ToA(A, B: pointer); overload; {$ifdef HASINLINE} inline; {$endif}
     /// thread-safe copy mapped A fields values into B
     // - A/B are either TObject instance or @record pointer, depending on Init()
-    procedure ToB(A, B: pointer); overload;
+    procedure ToB(A, B: pointer); overload; {$ifdef HASINLINE} inline; {$endif}
     /// thread-safe create a new A, copying mapped field values from B
     // - if Init(A) was a class, returned pointer is a new class instance,
     // which should be released via Free
@@ -3254,6 +3254,15 @@ type
     // which should be released via a proper Dispose()
     // - returned B is a newly allocated instance of the TClass specified to Init()
     function ToB(A: pointer): pointer; overload;
+    /// thread-safe create a dynamic array of type A from a dynamic array of type B
+    // - with proper mapped fields values between each instances
+    // - A/B are either T*ObjArray instance or array of records, depending on Init()
+    // - don't forget to eventually call ObjArrayClear(A/B) if A/B are TObject
+    procedure ToArrayA(var A, B);
+    /// thread-safe create a dynamic array of type B from a dynamic array of type A
+    // - with proper mapped fields values between each instances
+    // - A/B are either T*ObjArray instance or array of records, depending on Init()
+    procedure ToArrayB(var A, B);
     /// compare A and B fields, using the registered properties mapping
     // - could be useful e.g. for regression tests between DTOs and Domain Objects
     // - A/B are either TObject instance or @record pointer, depending on Init()
@@ -3270,8 +3279,7 @@ type
 
 // low level function defined here for proper inlining - do not call
 procedure RttiMapTo(fromPtr, toPtr: PAnsiChar; fromRtti: TRttiCustom;
-  map: PPRttiCustomProp); {$ifdef HASINLINE} inline; {$endif}
-
+  map: PPRttiCustomProp);
 
 { *********** TObjectWithRttiMethods TObjectWithID TClonable Classes }
 
@@ -10608,7 +10616,7 @@ begin
     result := aRtti.ClassNewInstance
   else
     result := AllocMem(aRtti.Size);
-  ToA(result, B);
+  RttiMapTo(B, result, bRtti, pointer(b2a));
 end;
 
 function TRttiMap.ToB(A: pointer): pointer;
@@ -10617,7 +10625,48 @@ begin
     result := bRtti.ClassNewInstance
   else
     result := AllocMem(bRtti.Size);
-  ToB(A, result);
+  RttiMapTo(A, result, aRtti, pointer(a2b));
+end;
+
+procedure RttiMapArray(fromPtr, toPtr: PAnsiChar; fromRtti, toRtti: TRttiCustom;
+  map: PPRttiCustomProp);
+var
+  n: PtrInt;
+  f, t: pointer;
+begin
+  FastDynArrayClear(pointer(toPtr), toRtti.Info);
+  fromPtr := PPointer(fromPtr)^; // from dynarray to items
+  if fromPtr = nil then
+    exit;
+  n := PDALen(fromPtr - _DALEN)^ + _DAOFF;
+  toPtr := DynArrayNew(pointer(toPtr), n, toRtti.Size);
+  if map <> nil then
+    repeat
+      if toRtti.Kind = rkClass then
+      begin
+        t := toRtti.ClassNewInstance;
+        PPointer(toPtr)^ := t; // new destination TObject storage
+      end
+      else
+        t := toPtr; // new zeroed destination record
+      f := fromPtr;
+      if fromRtti.Kind = rkClass then
+        f := PPointer(f)^; // source TObject redirection
+      RttiMapTo(f, t, fromRtti, map);
+      inc(fromPtr, fromRtti.Size);
+      inc(toPtr, toRtti.Size);
+      dec(n);
+    until n = 0;
+end;
+
+procedure TRttiMap.ToArrayA(var A, B);
+begin
+  RttiMapArray(@B, @A, bRtti, aRtti, pointer(b2a));
+end;
+
+procedure TRttiMap.ToArrayB(var A, B);
+begin
+  RttiMapArray(@A, @B, aRtti, bRtti, pointer(a2b));
 end;
 
 function TRttiMap.Compare(A, B: pointer; CaseInsensitive: boolean): integer;
@@ -10640,7 +10689,7 @@ begin
     inc(pb);
     dec(n);
   until n = 0;
-  result := 0;
+  result := 0; // all mapped properties are (born) equal
 end;
 
 procedure TRttiMap.RandomA(A: pointer);

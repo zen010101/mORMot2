@@ -1677,7 +1677,11 @@ begin
         Utf8DecodeToString(PUtf8Char(Ptr), len, result);
     ftBlob:
       with FromVarBlob(data) do
-        result := {$ifdef UNICODE}Ansi7ToString{$endif}(BinToBase64(Ptr, len));
+        {$ifdef UNICODE}
+        Ansi7ToString(BinToBase64(Ptr, len), result)
+        {$else}
+        result := BinToBase64(Ptr, len);
+        {$endif UNICODE}
   else
     raise ESqlDBRemote.CreateUtf8('%.ColumnString()', [self]);
   end;
@@ -2069,7 +2073,7 @@ function TSqlDBSocketConnectionProperties.InternalRequest(
   var Data, DataType: RawByteString): integer;
 begin
   result := fSocket.Request(
-    fDatabaseName, 'POST', fKeepAliveMS, '', Data, DataType, false);
+    fDatabaseName, 'POST', fKeepAliveMS, '', Data, DataType, {AsRetry=}false);
   Data := fSocket.Http.Content;
   DataType := fSocket.Http.ContentType;
 end;

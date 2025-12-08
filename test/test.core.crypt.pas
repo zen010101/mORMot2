@@ -22,6 +22,7 @@ uses
   mormot.crypt.other,
   mormot.crypt.openssl,
   mormot.crypt.secure,
+  mormot.crypt.ecc256r1,
   mormot.core.perf,
   mormot.core.test,
   mormot.core.variants,
@@ -1058,6 +1059,40 @@ const
     'XitCD/FEdhbjFbWKibrku9c/P7HNz7oqMx2QkhGa+asefQNnwFv+Nqac9rTCP7ld'#13#10 +
     'ewIDAQAB'#13#10 +
     '-----END PUBLIC KEY-----'#13#10;
+  _rsajwk = // _rsapub converted as JWK
+    '{'#10 +
+    '  "alg": "RS256",'#10 +
+    '  "e": "AQAB",'#10 +
+    '  "ext": true,'#10 +
+    '  "kid": "ccc3cb966a0e09297918052b374e",'#10 +
+    '  "kty": "RSA",'#10 +
+    '  "n": "tQ4_dhzEXlDpj71dwF3Tt1Sx_COvd6Y8R4kxgcLblmdt3BCmGAYgNS2yf0O' +
+       'RcGKse-wYLG-BV8rIT2zRPbrIXfEJmnjlnsQ635n9bMpfhFIyr9pE4w5y5ZUAzJS' +
+       'twYmudykFAfA7_1BWqD-uE3z5PqfnmZHEbYNHeBGt0vIRSfQQXXxj-wnpaQ-_GTY' +
+       'Qr5OHynyJS8esD9dpKfsExc7rBx4VH1tCx1SH9yVAMHts0674HjnnyFyveoXOajN' +
+       '1gxn4_iN1lfWZzzoWqyVvKWZ5XitCD_FEdhbjFbWKibrku9c_P7HNz7oqMx2QkhG' +
+       'a-asefQNnwFv-Nqac9rTCP7ldew",'#10 +
+    '  "use": "sig"'#10 +
+    '}'#10;
+
+  _eccpub =
+    '-----BEGIN PUBLIC KEY-----'#10 +
+    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoIQ8m1iBHYoxrdLT1A6MH9naG+hk'#10 +
+    '/ccw/Ij0p9Mk7JmNdzCUeEjzlU5/E683I9PZaz2/5RFj1HfKPTgDkxQFkA=='#10 +
+    '-----END PUBLIC KEY-----'#10;
+  _eccjwk = // _eccpub converted as JWK
+    '{'#10 +
+    '  "alg": "ES256",'#10 +
+    '  "crv": "P-256",'#10 +
+    '  "ext": true,'#10 +
+    '  "key_ops": ['#10 +
+    '    "verify"'#10 +
+    '  ],'#10 +
+    '  "kid": "VoycxROU3bdddiAPt2RaIuyjtcjcINVUeNp+FO9L+MA=",'#10 +
+    '  "kty": "EC",'#10 +
+    '  "x": "oIQ8m1iBHYoxrdLT1A6MH9naG-hk_ccw_Ij0p9Mk7Jk",'#10 +
+    '  "y": "jXcwlHhI85VOfxOvNyPT2Ws9v-URY9R3yj04A5MUBZA"'#10 +
+    '}'#10;
 
 procedure TTestCoreCrypto._JWT;
 
@@ -1254,10 +1289,7 @@ begin
   finally
     j.Free;
   end;
-  j := TJwtCrypt.Create(caaES256, '-----BEGIN PUBLIC KEY-----'#13#10 +
-    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoIQ8m1iBHYoxrdLT1A6MH9naG+hk'#13#10 +
-    '/ccw/Ij0p9Mk7JmNdzCUeEjzlU5/E683I9PZaz2/5RFj1HfKPTgDkxQFkA=='#13#10 +
-    '-----END PUBLIC KEY-----'#13#10, [jrcAudience], ['aud'], 60);
+  j := TJwtCrypt.Create(caaES256, _eccpub, [jrcAudience], ['aud'], 60);
   try
     CheckEqual(j.Algorithm, 'ES256');
   finally
@@ -1786,7 +1818,7 @@ const
 
 var
   buf: RawByteString;
-  u, pw, nfo, exp: RawUtf8;
+  u, pw, nfo, nfo2, exp, db, proof, mech: RawUtf8;
   iv: Int64;
   P: PAnsiChar;
   unalign: PtrInt;
@@ -1795,10 +1827,12 @@ var
   logN, blocksize, parallel, r,
   exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
   exp641, exp642: QWord;
-  hasher: TSynHasher;
   h, h2: THashAlgo;
   s, s2: TSignAlgo;
   mcf, mcf2: TModularCryptFormat;
+  sc: TScramClient;
+  clientsig: THash256;
+  hasher: TSynHasher;
   timer: TPrecisionTimer;
 begin
   // validate THashAlgo and TSignAlgo recognition
@@ -2026,6 +2060,19 @@ begin
   exp := '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2';
   Check(ModularCryptVerify('password', exp) = mcfBCryptSha256);
   Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  // cross-platform validate SCRAM-MCF with fixed reference content
+  pw := ScramPersistedKey(exp, 'user');
+  CheckEqual(pw, '#bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$knkUgRsX' +
+    'J0GLVysC4CKT18496Xv5ivqxyMUq5kba3VL0bucxogXVaUUnyhgVK9GmWCkrjL-KbDWrFUDfvLOv0Q');
+  FillZero(clientsig);
+  Check(IsZero(clientsig));
+  proof := ScramClientProof(exp, 'user', clientsig, ['root', 'user', 'cn', 'sn']);
+  Check(not IsZero(clientsig));
+  CheckEqual(proof, 'HtI7ThnH1VYYSDcrorMdg8nSGwVQm_uOMnim3a31WD8');
+  proof := ScramServerProof(pw, proof, ['root', 'user', 'cn', 'sn']);
+  CheckEqual(proof, 'fj_E-R1orj7jvv84CGF-ejICOpauk2ZAqtr8nDUn-Ec');
+  Check(ScramClientServerAuth(exp, 'user', proof, clientsig), 'ScramClientServerAuthRef');
+  Check(IsZero(clientsig));
   // pure pascal and OpenSSL SCrypt implementation
   {$ifdef USE_OPENSSL}
   if OpenSslIsAvailable then
@@ -2084,6 +2131,27 @@ begin
       CheckEqual(u, ModularCryptHash(nfo, pw), 'simulate client side re-hash');
       if u <> '' then // avoid GPF
       begin
+        // validate SCRAM-like mutual authentication using MCF hashes
+        Check(u[1] = '$');
+        db := ScramPersistedKey(u, 'user');
+        Check(db <> '', 'ScramPersistedKey');
+        Check(db[1] = '#');
+        Check(ModularCryptIdentify(db, @nfo2) = mcf);
+        Check(nfo2[1] = '#');
+        nfo2[1] := '$';
+        CheckEqual(nfo, nfo2);
+        Check(u[1] = '$');
+        Check(IsZero(clientsig));
+        proof := ScramClientProof(u, 'user', clientsig, ['root', 'user', 'cn', 'sn']);
+        Check(not IsZero(clientsig));
+        Check(proof <> '', 'ScramClientProof');
+        Check(ScramServerProof(db, proof, ['root', 'user', 'cn', 'so']) = '');
+        proof := ScramServerProof(db, proof, ['root', 'user', 'cn', 'sn']);
+        Check(proof <> '', 'ScramServerProof');
+        Check(ScramClientServerAuth(u, 'user', proof, clientsig), 'ScramClientServerAuth');
+        Check(IsZero(clientsig));
+        Check(not ScramClientServerAuth(u, 'user', proof, clientsig), 'clientsig=0');
+        Check(IsZero(clientsig));
         dec(PByteArray(u)[length(u) - 5]);
         Check(ModularCryptVerify(pw, u) = mcfInvalid);
       end;
@@ -2109,6 +2177,66 @@ begin
     Check(StartWithExact(u, nfo));
     Check(ModularCryptIdentify(nfo) = mcf);
     //ConsoleWrite([CRLF,'ModularCryptHash(''',nfo,''',''password'')=''',u,''');']);
+  end;
+  // regular SCRAM client validation against RFC reference vectors
+  sc := TScramClient.Create(saSha1);
+  try
+    // from RFC 5802 section 5
+    CheckEqual(sc.LastError, '');
+    u := sc.ComputeFirstMessage('user', mech, 'fyko+d2lbbFgONRv9qkxdawL');
+    CheckEqual(u, 'n,,n=user,r=fyko+d2lbbFgONRv9qkxdawL');
+    CheckEqual(mech, 'SCRAM-SHA-1');
+    CheckEqual(sc.LastError, '');
+    proof := sc.ComputeFinalMessage('r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,' +
+      's=QSXCR+Q6sek8bf92,i=4096', 'pencil');
+    CheckEqual(proof, 'c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,' +
+      'p=v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=');
+    CheckEqual(sc.LastError, '');
+    Check(sc.CheckFinalResponse('v=rmF9pqV8S7suAoZWja4dJRkFsKQ='));
+    Check(not sc.CheckFinalResponse('v=rmF9pqV8S7suAoZWja4dJRkFskQ='));
+    Check(sc.CheckFinalResponse('v=rmF9pqV8S7suAoZWja4dJRkFsKQ='));
+  finally
+    sc.Free;
+  end;
+  sc := TScramClient.Create(saSha256);
+  try
+    // from RFC 7677 section 3
+    CheckEqual(sc.LastError, '');
+    u := sc.ComputeFirstMessage('user', mech, 'rOprNGfwEbeRWgbNEkqO');
+    CheckEqual(u, 'n,,n=user,r=rOprNGfwEbeRWgbNEkqO');
+    CheckEqual(mech, 'SCRAM-SHA-256');
+    CheckEqual(sc.LastError, '');
+    proof := sc.ComputeFinalMessage(
+      'r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      's=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096', 'pencil');
+    CheckEqual(proof, 'c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      'p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=');
+    CheckEqual(sc.LastError, '');
+    Check(sc.CheckFinalResponse('v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4='));
+    Check(not sc.CheckFinalResponse('v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G3='));
+    Check(sc.CheckFinalResponse('v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4='));
+  finally
+    sc.Free;
+  end;
+  sc := TScramClient.Create(saSha256, {mcfsupport=}true);
+  try
+    // from draft-bouchez-kitten-scram-mcf-01 proposal
+    CheckEqual(sc.LastError, '');
+    u := sc.ComputeFirstMessage('user', mech, 'rOprNGfwEbeRWgbNEkqO');
+    CheckEqual(u, 'n,,n=user,r=rOprNGfwEbeRWgbNEkqO,f=y');
+    CheckEqual(mech, 'SCRAM-SHA-256');
+    CheckEqual(sc.LastError, '');
+    // '$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$IjXuXIAkQMquDcMPr1JniPO6vG5uSxxFHf8jAIpAbDk'
+    nfo := BinToBase64('$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$');
+    proof := sc.ComputeFinalMessage(
+      'r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      'f=' + nfo, 'pencil');
+    CheckEqual(proof, 'c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      'p=LyMcKMrzBJUoDhfO7e8aD0BYBLqe3wBrCoJMTIEhJEg=');
+    CheckEqual(sc.LastError, '');
+    Check(sc.CheckFinalResponse('v=2c7tBGYYY8tx/oLZNhZVJnjQKWeku17ZDaV0Jh3Hvmo='));
+  finally
+    sc.Free;
   end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
@@ -3766,14 +3894,17 @@ var
   crt: TCryptCertAlgo absolute Context;
   timer: TPrecisionTimer;
   caa: TCryptAsymAlgo;
+  cka: TCryptKeyAlgo;
   c1, c2, c3, c4: ICryptCert;
-  s, r, csr: RawByteString;
-  jwt, iss, sub, s2, s3, n, priv: RawUtf8;
+  pub: ICryptPublicKey;
+  s, r, csr, x, y, x2, y2: RawByteString;
+  jwt, iss, sub, s2, s3, n, priv, jwk: RawUtf8;
   fmt: TCryptCertFormat;
   cv: TCryptCertValidity;
   u: TCryptCertUsage;
   fields: TCryptCertFields;
   cpe: TCryptCertPerUsage;
+  eccpub1, eccpub2: TEccPublicKey;
 begin
   timer.Start;
   check(PosEx(UpperCase(CAA_JWT[crt.AsymAlgo]), UpperCase(crt.AlgoName)) > 0);
@@ -3831,6 +3962,34 @@ begin
   check(c1.GetNotBefore <= NowUtc + CERT_DEPRECATION_THRESHOLD, 'nbef');
   check(c1.GetNotAfter > NowUtc - CERT_DEPRECATION_THRESHOLD, 'naft');
   check(c1.SetPrivateKey(c1.GetPrivateKey), 'in-place pk replace');
+  jwk := c1.JwkCompute;
+  if jwk <> '' then
+  begin
+    cka := CAA_CKA[caa];
+    //writeln(CRLF, cka, ' from ', c1.Instance.ClassName, ' as ', crt.AlgoName, '  ', jwk);
+    if cka = ckaEcc256 then
+    begin
+      CheckEqual(jwk, c1.JwkCompute);
+      Check(JwkToEcc(jwk, eccpub1));
+      pub := TCryptPublicKeyEcc.Create;
+      x := c1.GetPublicKey;
+      Check(pub.Load(cka, x));
+      Check(pub.GetParams(x, y));
+      CheckEqual(SaveAsJwk(caa, x, y), jwk);
+    end;
+    pub := CryptPublicKey[cka].Create;
+    Check(pub.Load(cka, c1.GetPublicKey), 'jwkpub');
+    Check(pub.KeyAlgo = cka, 'jwkalgo1');
+    Check(pub.GetParams(x, y));
+    CheckEqual(SaveAsJwk(caa, x, y), jwk);
+    pub := CryptPublicKey[cka].Create;
+    Check(pub.Load(cka, jwk), 'jwkload');
+    Check(pub.KeyAlgo = cka, 'jwkalgo2');
+    Check(pub.GetParams(x2, y2));
+    CheckEqual(SaveAsJwk(caa, x2, y2), jwk);
+    CheckEqual(x, x2);
+    CheckEqual(y, y2);
+  end;
   for fmt := ccfBinary to ccfPem do
   begin
     c2 := crt.New;
@@ -4226,6 +4385,28 @@ var
   crt: TCryptCertAlgo;
   str: TCryptStoreAlgo;
   alg: TCryptAlgos;
+
+ procedure DoEcc(ecc: TCryptPublicKeyClass);
+ var
+   pub: ICryptPublicKey;
+   x1, x2, y1, y2: RawByteString;
+ begin
+   pub := ecc.Create;
+   check(pub.Load(ckaEcc256, _eccpub));
+   check(pub.GetParams(x1, y1));
+   //writeln(BinToHEx(x1)); writeln(bintohex(y1));
+   CheckEqual(BinToBase64Uri(x1), 'oIQ8m1iBHYoxrdLT1A6MH9naG-hk_ccw_Ij0p9Mk7Jk');
+   CheckEqual(BinToBase64Uri(y1), 'jXcwlHhI85VOfxOvNyPT2Ws9v-URY9R3yj04A5MUBZA');
+   pub := ecc.Create;
+   check(pub.Load(ckaEcc256, _eccjwk));
+   check(pub.GetParams(x2, y2));
+   //writeln(BinToHEx(x2)); writeln(bintohex(y2));
+   CheckEqual(BinToBase64Uri(x2), 'oIQ8m1iBHYoxrdLT1A6MH9naG-hk_ccw_Ij0p9Mk7Jk');
+   CheckEqual(BinToBase64Uri(y2), 'jXcwlHhI85VOfxOvNyPT2Ws9v-URY9R3yj04A5MUBZA');
+   check(x1 = x2);
+   check(y1 = y2);
+ end;
+
 begin
   // validate AesAlgoNameEncode / TAesMode
   FillZero(key);
@@ -4342,6 +4523,11 @@ begin
     end;
   end;
   // validate Asym() High-Level Algorithms Factory
+  {$ifdef USE_OPENSSL}
+  if TOpenSslHash.IsAvailable then
+    DoEcc(TCryptPublicKeyOpenSsl);
+  {$endif USE_OPENSSL}
+  DoEcc(TCryptPublicKeyEcc);
   alg := TCryptAsym.Instances;
   //fCatalogAllGenerate := SystemInfo.dwNumberOfProcessors > 8; // not worth it
   for a := 0 to high(alg) do
@@ -4663,7 +4849,7 @@ var
   rnd: HalfUInt; // truncated to 16-bit or 32-bit value
   a, b, s, d, e, m, v: PBigInt;
   cu, pem, txt: RawUtf8;
-  bin, hash, signed, encrypted: RawByteString;
+  bin, pub, hash, signed, encrypted: RawByteString;
   pub1, pub2: TRsaPublicKey;
   pri1, pri2: TRsaPrivateKey;
   timer: TPrecisionTimer;
@@ -5064,6 +5250,7 @@ begin
   finally
     c.Free;
   end;
+  pub := PemToDer(_rsapub);
   c := TRsa.Create;
   try
     Check(c.LoadFromPublicKeyPem(_rsapub));
@@ -5072,13 +5259,25 @@ begin
     CheckEqual(c.E.ToText, '65537');
     CheckEqual(BigIntToText(c.E.Save), '65537');
     CheckEqual(c.M.ToText, txt);
-    Check(c.SavePublicKeyDer = PemToDer(_rsapub));
+    Check(c.SavePublicKeyDer = pub);
     Check(c.SavePrivateKeyDer = '');
     timer.Start;
     for i := 1 to 100 do
       Check(c.Verify(pointer(hash), hfSHA256, bin), 'verifloop');
     NotifyTestSpeed('RS256 verify', 100, 0, @timer);
     CheckEqualHex(hash, _hash);
+  finally
+    c.Free;
+  end;
+  c := TRsa.Create;
+  try
+    Check(c.LoadFromPublicKeyJwk(_rsajwk));
+    Check(c.HasPublicKey);
+    Check(not c.HasPrivateKey);
+    CheckEqual(c.E.ToText, '65537');
+    CheckEqual(c.M.ToText, txt);
+    Check(c.SavePublicKeyDer = pub);
+    Check(c.SavePrivateKeyDer = '');
   finally
     c.Free;
   end;

@@ -1100,7 +1100,7 @@ function RawUnicodeToSynUnicode(const Unicode: RawUnicode): SynUnicode; overload
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any RTL string into a RawUnicode encoded String
-// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
+// - it's preferred to use TLanguageFile.StringToUtf8() method in mORMoti18n,
 // which will handle full i18n of your application
 // - it will work as is with Delphi 2009+ (direct unicode conversion)
 // - under older version of Delphi (no unicode), it will use the
@@ -1109,7 +1109,7 @@ function RawUnicodeToSynUnicode(const Unicode: RawUnicode): SynUnicode; overload
 function StringToRawUnicode(const S: string): RawUnicode; overload;
 
 /// convert any RTL string into a RawUnicode encoded String
-// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
+// - it's preferred to use TLanguageFile.StringToUtf8() method in mORMoti18n,
 // which will handle full i18n of your application
 // - it will work as is with Delphi 2009+ (direct unicode conversion)
 // - under older version of Delphi (no unicode), it will use the
@@ -1227,7 +1227,7 @@ function WinAnsiToSynUnicode(const WinAnsi: WinAnsiString): SynUnicode;
   {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// convert any RTL string into an UTF-8 encoded String
-// - in the VCL context, it's prefered to use TLanguageFile.StringToUtf8()
+// - in the VCL context, it's preferred to use TLanguageFile.StringToUtf8()
 //  method from mORMoti18n, which will handle full i18n of your application
 // - it will work as is with Delphi 2009+ (direct unicode conversion)
 // - under older version of Delphi (no unicode), it will use the
@@ -1287,7 +1287,7 @@ function StringBufferToUtf8(Dest: PUtf8Char;
 procedure StringBufferToUtf8(Source: PChar; out result: RawUtf8); overload;
 
 /// convert any RTL string into a SynUnicode encoded String
-// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
+// - it's preferred to use TLanguageFile.StringToUtf8() method in mORMoti18n,
 // which will handle full i18n of your application
 // - it will work as is with Delphi 2009+ (direct unicode conversion)
 // - under older version of Delphi (no unicode), it will use the
@@ -1312,7 +1312,7 @@ function SynUnicodeToString(const U: SynUnicode): string;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a RTL string
-// - it's prefered to use TLanguageFile.Utf8ToString() in mORMoti18n,
+// - it's preferred to use TLanguageFile.Utf8ToString() in mORMoti18n,
 // which will handle full i18n of your application
 // - it will work as is with Delphi 2009+ (direct unicode conversion)
 // - under older version of Delphi (no unicode), it will use the
@@ -1328,7 +1328,7 @@ procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
 procedure Utf8ToFileName(const Text: RawUtf8; var result: TFileName);
 
 /// convert any UTF-8 encoded buffer into a RTL string
-// - it's prefered to use TLanguageFile.Utf8ToString() in mORMoti18n,
+// - it's preferred to use TLanguageFile.Utf8ToString() in mORMoti18n,
 // which will handle full i18n of your application
 // - it will work as is with Delphi 2009+ (direct unicode conversion)
 // - under older version of Delphi (no unicode), it will use the
@@ -1373,7 +1373,12 @@ function Utf8DecodeToUnicode(Text: PUtf8Char; Len: PtrInt; var temp: TSynTempBuf
 /// convert any Ansi 7-bit encoded String into a RTL string
 // - the Text content must contain only 7-bit pure ASCII characters
 function Ansi7ToString(const Text: RawByteString): string; overload;
-  {$ifndef UNICODE}{$ifdef HASINLINE}inline;{$endif}{$endif}
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any Ansi 7-bit encoded String into a RTL string
+// - the Text content must contain only 7-bit pure ASCII characters
+procedure Ansi7ToString(const Text: RawByteString; var Dest: string); overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any Ansi 7-bit encoded String into a RTL string
 // - the Text content must contain only 7-bit pure ASCII characters
@@ -1382,7 +1387,8 @@ function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string; overload;
 
 /// convert any Ansi 7-bit encoded String into a RTL string
 // - the Text content must contain only 7-bit pure ASCII characters
-procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var result: string); overload;
+procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var Dest: string); overload;
+  {$ifndef UNICODE}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// convert any RTL string into Ansi 7-bit encoded String
 // - the Text content must contain only 7-bit pure ASCII characters
@@ -1557,7 +1563,7 @@ function IdemPropNameU(const P1, P2: RawUtf8): boolean; overload;
 /// returns true if the beginning of p^ is the same as up^
 // - ignore case - up^ must be already Upper
 // - chars are compared as 7-bit Ansi only (no accentuated characters): but when
-// you only need to search for field names e.g. IdemPChar() is prefered, because
+// you only need to search for field names e.g. IdemPChar() is preferred, because
 // it'll be faster than IdemPCharU(), if UTF-8 decoding is not mandatory
 // - if p is nil, will return FALSE
 // - if up is nil, will return TRUE
@@ -1571,7 +1577,7 @@ function IdemPChar(p: PUtf8Char; up: PAnsiChar; table: PNormTable): boolean; ove
 // - ignore case - up^ must be already Upper
 // - any white space in the input p^ buffer is just ignored
 // - chars are compared as 7-bit Ansi only (no accentuated characters): but when
-// you only need to search for field names e.g. IdemPChar() is prefered, because
+// you only need to search for field names e.g. IdemPChar() is preferred, because
 // it'll be faster than IdemPCharU(), if UTF-8 decoding is not mandatory
 // - if p is nil, will return FALSE
 // - if up is nil, will return TRUE
@@ -4411,8 +4417,7 @@ begin
   inherited;
   if not IsFixedWidthCodePage(aCodePage) then
     // warning: CreateUtf8() uses Utf8ToString() -> call CreateFmt() here
-    raise ESynUnicode.CreateFmt('%s.Create - Invalid code page %d',
-      [ClassNameShort(self)^, fCodePage]);
+    ESynUnicode.RaiseFmt(self, 'Create - Invalid code page %d', [fCodePage]);
   // create internal look-up tables
   SetLength(fAnsiToWide, 256);
   if (aCodePage = CP_WINANSI) or
@@ -4438,8 +4443,7 @@ begin
     if (len < 500) or
        (len > 512) then
       // warning: CreateUtf8() uses Utf8ToString() -> call CreateFmt() now
-      raise ESynUnicode.CreateFmt('OS error for %s.Create(%d) [%d]',
-        [ClassNameShort(self)^, aCodePage, len]);
+      ESynUnicode.RaiseFmt(self, 'Create(%d): OS error [%d]', [aCodePage, len]);
     MoveFast(u[0], fAnsiToWide[0], 512);
   end;
   SetLength(fWideToAnsi, 65536);
@@ -4780,7 +4784,7 @@ end;
 constructor TSynAnsiUtf8.Create(aCodePage: cardinal);
 begin
   if aCodePage <> CP_UTF8 then
-    raise ESynUnicode.CreateFmt('%s.Create(%d)', [ClassNameShort(self)^, aCodePage]);
+    ESynUnicode.RaiseFmt(self, 'Create(%d) is unexpected', [aCodePage]);
   inherited Create(aCodePage);
 end;
 
@@ -4874,7 +4878,7 @@ end;
 constructor TSynAnsiUtf16.Create(aCodePage: cardinal);
 begin
   if aCodePage <> CP_UTF16 then
-    raise ESynUnicode.CreateFmt('%s.Create(%d)', [ClassNameShort(self)^, aCodePage]);
+    ESynUnicode.RaiseFmt(self, 'Create(%d)', [aCodePage]);
   inherited Create(aCodePage);
 end;
 
@@ -5209,7 +5213,7 @@ begin
   if L = 0 then
     exit;
   // +1 below is for #0 ending -> true WideChar(#0) ending
-  tmp.Init(L * 3); // maximum posible unicode size (if all <#128)
+  tmp.Init(L * 3); // maximum possible unicode size (if all <#128)
   SetString(result, PAnsiChar(tmp.buf), Utf8ToWideChar(tmp.buf, P, L) + 1);
   tmp.Done;
 end;
@@ -5396,27 +5400,23 @@ end;
 
 {$ifdef UNICODE}
 
-function Ansi7ToString(const Text: RawByteString): string;
+procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var Dest: string);
 var
   i: PtrInt;
 begin
-  FastSynUnicode(result, nil, Length(Text));
-  for i := 0 to Length(Text) - 1 do
-    PWordArray(result)[i] := cardinal(PByteArray(Text)[i]); // 7-bit assign
+  FastSynUnicode(Dest, nil, Len);
+  for i := 0 to Len - 1 do
+    PWordArray(Dest)[i] := cardinal(PByteArray(Text)[i]); // 7-bit assign
+end;
+
+procedure Ansi7ToString(const Text: RawByteString; var Dest: string);
+begin
+  Ansi7ToString(pointer(Text), length(Text), Dest);
 end;
 
 function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string;
 begin
   Ansi7ToString(Text, Len, result);
-end;
-
-procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var result: string);
-var
-  i: PtrInt;
-begin
-  FastSynUnicode(result, nil, Len);
-  for i := 0 to Len - 1 do
-    PWordArray(result)[i] := cardinal(PByteArray(Text)[i]); // 7-bit assign
 end;
 
 function StringToAnsi7(const Text: string): RawByteString;
@@ -5544,12 +5544,12 @@ end;
 
 {$else}
 
-function Ansi7ToString(const Text: RawByteString): string;
+procedure Ansi7ToString(const Text: RawByteString; var Dest: string); overload;
 begin
-  result := Text; // if we are SURE this text is 7-bit Ansi -> direct assign
-  {$ifdef FPC} // if Text is CP_RAWBYTESTRING then FPC won't handle it properly
-  SetCodePage(RawByteString(result), Unicode_CodePage, false);
-  {$endif FPC} // no FakeCodePage() since Text may be read-only
+  Dest := Text; // if we are SURE this text is 7-bit Ansi -> direct assign
+  {$ifdef FPC}  // if Text is CP_RAWBYTESTRING then FPC won't handle it properly
+  SetCodePage(RawByteString(Dest), Unicode_CodePage, false);
+  {$endif FPC}  // no FakeCodePage() since Text may be read-only
 end;
 
 function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string;
@@ -5557,9 +5557,9 @@ begin
   SetString(result, PAnsiChar(Text), Len);
 end;
 
-procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var result: string);
+procedure Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt; var Dest: string);
 begin
-  SetString(result, PAnsiChar(Text), Len);
+  SetString(Dest, PAnsiChar(Text), Len);
 end;
 
 function StringToAnsi7(const Text: string): RawByteString;
@@ -5691,6 +5691,11 @@ end;
 
 {$endif UNICODE}
 
+function Ansi7ToString(const Text: RawByteString): string;
+begin
+  Ansi7ToString(Text, result);
+end;
+
 function ToUtf8(const Ansi7Text: ShortString): RawUtf8;
 begin
   FastSetString(result, @Ansi7Text[1], ord(Ansi7Text[0]));
@@ -5717,7 +5722,7 @@ begin
     result := ''
   else
   begin
-    tmp.Init(L * 3); // maximum posible unicode size (if all <#128)
+    tmp.Init(L * 3); // maximum possible unicode size (if all <#128)
     FastSynUnicode(result, tmp.buf, Utf8ToWideChar(tmp.buf, P, L) shr 1);
     tmp.Done;
   end;
@@ -5903,7 +5908,7 @@ begin
     result := ''
   else
   begin
-    tmp.Init(Len * 3); // maximum posible unicode size (if all <#128)
+    tmp.Init(Len * 3); // maximum possible unicode size (if all <#128)
     SetString(result, PWideChar(tmp.buf), Utf8ToWideChar(tmp.buf, Text, Len) shr 1);
     tmp.Done;
   end;
@@ -5950,7 +5955,7 @@ begin
   end
   else
   begin
-    temp.Init(Len * 3); // maximum posible unicode size (if all <#128)
+    temp.Init(Len * 3); // maximum possible unicode size (if all <#128)
     result := Utf8ToWideChar(temp.buf, Text, Len) shr 1; // as WideChar count
   end;
 end;
@@ -9576,7 +9581,7 @@ function SanitizePascalName(const aName: RawUtf8; KeyWordCheck: boolean): RawUtf
 begin
   CamelCase(aName, result);
   if result = '' then
-    raise ESynUnicode.CreateFmt('Unexpected SanitizePascalName(%s)', [aName]);
+    ESynUnicode.RaiseFmt(nil, 'Unexpected SanitizePascalName(%s)', [aName]);
   result[1] := UpCase(result[1]);
   if KeyWordCheck and
      IsReservedKeyWord(result) then

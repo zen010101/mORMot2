@@ -266,7 +266,7 @@ type
       out Jwt: TJwtContent): boolean; overload;
     /// internal method to parse a token according to this JWT expectations
     // - without any cache, digital signature nor time consistency check
-    // - as called internally by Verify(), which is the prefered method to call
+    // - as called internally by Verify(), which is the preferred method to call
     // - see also the associated ParseJwt() function
     procedure Parse(const Token: RawUtf8; var Jwt: TJwtContent;
       headpayload: PValuePUtf8Char = nil; signature: PRawByteString = nil;
@@ -1680,14 +1680,15 @@ begin
   try
     if aKey <> '' then
       // try as private key, then as public key
-      if fRsa.LoadFromPrivateKeyPem(aKey) then // handle PEM or DER
+      if fRsa.LoadFromPrivateKeyPem(aKey) then  // handle PEM or DER
       begin
         if (fRsa.ModulusBits < 2048) or
            not fRsa.CheckPrivateKey then
         ERsaException.RaiseUtf8('%.Create: invalid %-bit private key',
           [self, fRsa.ModulusBits]);
       end
-      else if fRsa.LoadFromPublicKeyPem(aKey) then // PEM or DER
+      else if fRsa.LoadFromPublicKeyPem(aKey) or   // PEM or DER
+              fRsa.LoadFromPublicKeyJwk(aKey) then // JWT JSON
         if fRsa.ModulusBits < 2048 then
           ERsaException.RaiseUtf8(
             '%.Create: invalid %-bit public key', [self, fRsa.ModulusBits]);

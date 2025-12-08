@@ -179,7 +179,7 @@ function IsString(P: PUtf8Char): boolean;
 // - e.g. IsStringJson('0')=false, IsStringJson('abc')=true,
 // but IsStringJson('null')=false
 // - will follow the JSON definition of number, i.e. '0123' is a string (since
-// '0' is excluded at the begining of a number) and '123' or '12.3' are no string
+// '0' is excluded at the beginning of a number) and '123' or '12.3' are no string
 function IsStringJson(P: PUtf8Char): boolean;
 
 /// test if the supplied text buffer seems to be a correct (extended) JSON value
@@ -6469,31 +6469,31 @@ var
   start: PUtf8Char;
 begin
   if Format <> nil then
-  repeat
-    start := Format;
     repeat
-      if (Format^ = #0) or
-         (Format^ = '%') then
-        break;
+      start := Format;
+      repeat
+        if (Format^ = #0) or
+           (Format^ = '%') then
+          break;
+        inc(Format);
+      until false;
+      AddNoJsonEscape(start, Format - start);
+      if Format^ = #0 then
+        exit;
+      // add next value as text instead of Format^='%' placeholder
       inc(Format);
+      if ValuesCount <= 0 then
+        continue; // missing value will display nothing
+      if (Escape = twNone) or
+         (byte(Values^.VType) in vtNotString) then
+        AddVarRec(Values)
+      else
+        AddVarRec(Values, Escape, WriteObjectOptions);
+      if Format^ = #0 then
+        exit;
+      inc(Values);
+      dec(ValuesCount);
     until false;
-    AddNoJsonEscape(start, Format - start);
-    if Format^ = #0 then
-      exit;
-    // add next value as text instead of Format^='%' placeholder
-    inc(Format);
-    if ValuesCount <= 0 then
-      continue; // missing value will display nothing
-    if (Escape = twNone) or
-       (byte(Values^.VType) in vtNotString) then
-      AddVarRec(Values)
-    else
-      AddVarRec(Values, Escape, WriteObjectOptions);
-    if Format^ = #0 then
-      exit;
-    inc(Values);
-    dec(ValuesCount);
-  until false;
 end;
 
 procedure TJsonWriter.AddCsvUtf8(const Values: array of RawUtf8);

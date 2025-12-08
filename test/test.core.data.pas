@@ -2156,10 +2156,10 @@ var
     Check(IniToObject('[main]'#10'somefield=toto', G2));
     CheckEqual(G2.SomeField, 'toto');
     CheckEqual(G2.NestedObject.FieldInteger, 0);
-    Check(IniToObject('[main]'#10'somefield=titi'#10'[nestedobject]'#10'fieldinteger=7', G2));
+    Check(IniToObject('[main]'#10'somefield = titi '#10'[nestedobject]'#10' fieldinteger = 7', G2));
     CheckEqual(G2.SomeField, 'titi');
     CheckEqual(G2.NestedObject.FieldInteger, 7);
-    Check(IniToObject('[main]'#10'[nestedobject]'#10'fieldstring=c:\abc', G2));
+    Check(IniToObject('[main]'#13#10'[nestedobject]'#13#10'fieldstring=c:\abc'#13, G2));
     CheckEqual(G2.SomeField, 'titi');
     CheckEqual(G2.NestedObject.FieldInteger, 7);
     CheckEqual(G2.NestedObject.FieldString, 'c:\abc');
@@ -7170,6 +7170,8 @@ begin
     CheckEqual(UrlDecode(UrlEncode(s)), s, s);
   end;
   utf := BinToBase64Uri(@Guid, SizeOf(Guid));
+  Check(utf = '00amyWGct0y_ze4lIsj2Mw');
+  utf := BinToBase64Uri(PHash128(@Guid)^);
   Check(utf = '00amyWGct0y_ze4lIsj2Mw');
   FillCharFast(Guid2, SizeOf(Guid2), 0);
   Check(Base64uriToBin(utf, @Guid2, SizeOf(Guid2)));

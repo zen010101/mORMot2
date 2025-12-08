@@ -1448,6 +1448,9 @@ type
     function Equals(const aName: RawUtf8; const aValue: variant;
       aCaseInsensitive: boolean = false): boolean; overload;
       {$ifdef ISDELPHI}{$ifdef HASINLINE}inline;{$endif}{$endif}
+    /// compare a TTDocVariantData object property with a given text value
+    function CompareText(const aName, aValue: RawUtf8;
+      aCaseInsensitive: boolean = false): integer;
     /// low-level method called internally to reserve place for new values
     // - returns the index of the newly created item in Values[]/Names[] arrays
     // - you should not have to use it, unless you want to add some items
@@ -1970,6 +1973,10 @@ type
     // - you can specify an optional index in the array where to insert
     // - returns the index of the corresponding newly added item
     function AddItemText(const aValue: RawUtf8; aIndex: integer = -1): integer;
+    /// add an item in this array document from a real value and its associated RTTI
+    // - returns the index of the corresponding newly added item
+    function AddItemRtti(aItem: pointer; aRtti: TRttiCustom;
+      aIndex: integer = -1): integer;
     /// add one or several values to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     procedure AddItems(const aValue: array of const);
@@ -3728,6 +3735,10 @@ function DocDictCopy(const v: variant): IDocDict; overload;
 function DocDictCopy(const dv: TDocVariantData;
   model: TDocVariantModel): IDocDict; overload;
 
+/// create a self-owned IDocDict/IDocList from a JSON object/array content
+// - if json is something else than an object or array, returns nil
+function DocAny(const json: RawUtf8; model: TDocVariantModel): IDocAny;
+
 var
   /// default TDocVariant model for IDocList/IDocDict
   DocAnyDefaultModel: TDocVariantModel = mFastFloat;
@@ -3857,40 +3868,39 @@ var
   custom: TSynInvokeableVariantType;
 begin
   vt := TVarData(V).VType;
-  with TVarData(V) do
-    case vt of
-      varEmpty,
-      varNull:
-        result := true;
-      varBoolean:
-        result := not VBoolean;
-      {$ifdef HASVARUSTRING}
-      varUString,
-      {$endif HASVARUSTRING}
-      varString,
-      varOleStr:
-        result := VAny = nil;
-      varDate:
-        result := VInt64 = 0;
-      // note: 0 as integer or float is considered as non-void
+  case vt of
+    varEmpty,
+    varNull:
+      result := true;
+    varBoolean:
+      result := not TVarData(V).VBoolean;
+    {$ifdef HASVARUSTRING}
+    varUString,
+    {$endif HASVARUSTRING}
+    varString,
+    varOleStr:
+      result := TVarData(V).VAny = nil;
+    varDate:
+      result := TVarData(V).VInt64 = 0;
+    // note: 0 as integer or float is considered as non-void
+  else
+    if vt = varVariantByRef then
+      result := VarIsVoid(PVariant(TVarData(V).VPointer)^)
+    else if (vt = varStringByRef) or
+            (vt = varOleStrByRef)
+            {$ifdef HASVARUSTRING} or
+            (vt = varUStringByRef)
+            {$endif HASVARUSTRING} then
+      result := PPointer(TVarData(V).VAny)^ = nil
+    else if vt = DocVariantVType then
+      result := TDocVariantData(V).Count = 0
     else
-      if vt = varVariantByRef then
-        result := VarIsVoid(PVariant(VPointer)^)
-      else if (vt = varStringByRef) or
-              (vt = varOleStrByRef)
-              {$ifdef HASVARUSTRING} or
-              (vt = varUStringByRef)
-              {$endif HASVARUSTRING} then
-        result := PPointer(VAny)^ = nil
-      else if vt = DocVariantVType then
-        result := TDocVariantData(V).Count = 0
-      else
-      begin
-        custom := FindSynVariantType(vt);
-        result := (custom <> nil) and
-                  custom.IsVoid(TVarData(V)); // e.g. TBsonVariant.IsVoid
-      end;
+    begin
+      custom := FindSynVariantType(vt);
+      result := (custom <> nil) and
+                custom.IsVoid(TVarData(V)); // e.g. TBsonVariant.IsVoid
     end;
+  end;
 end;
 
 function VarStringOrNull(const v: RawUtf8): variant;
@@ -4534,45 +4544,44 @@ end;
 
 function VariantEquals(const V: Variant; const Str: RawUtf8;
   CaseSensitive: boolean): boolean;
-
-  function Complex: boolean;
-  var
-    wasString: boolean;
-    tmp: RawUtf8;
-  begin
-    VariantToUtf8(V, tmp, wasString);
-    if CaseSensitive then
-      result := (tmp = Str)
-    else
-      result := PropNameEquals(tmp, Str);
-  end;
-
 var
   v1, v2: Int64;
   vt: cardinal;
+  wasString: boolean;
+  tmp: pointer; // fake RawUtf8
 begin
   vt := TVarData(V).VType;
-  with TVarData(V) do
-    case vt of
-      varEmpty,
-      varNull:
-        result := Str = '';
-      varBoolean:
-        result := VBoolean = (Str <> '');
-      varString:
-        if CaseSensitive then
-          result := RawUtf8(VString) = Str
-        else
-          result := PropNameEquals(RawUtf8(VString), Str);
-    else
-      if VariantToInt64(V, v1) then
-      begin
-        SetInt64(pointer(Str), v2);
-        result := v1 = v2;
-      end
+  case vt of
+    varEmpty,
+    varNull:
+      result := Str = '';
+    varBoolean:
+      result := TVarData(V).VBoolean = (Str <> '');
+    varString:
+      if CaseSensitive then
+        result := RawUtf8(TVarData(V).VString) = Str
       else
-        result := Complex;
+        result := PropNameEquals(RawUtf8(TVarData(V).VString), Str);
+  else
+    if VariantToInt64(V, v1) then
+    begin
+      SetInt64(pointer(Str), v2);
+      result := v1 = v2;
+    end
+    else
+    begin
+      tmp := nil;
+      try
+        VariantToUtf8(V, RawUtf8(tmp), wasString);
+        if CaseSensitive then
+          result := (RawUtf8(tmp) = Str)
+        else
+          result := PropNameEquals(RawUtf8(tmp), Str);
+      finally
+        FastAssignNew(tmp); // VariantToUtf8() may trigger an exception
+      end;
     end;
+  end;
 end;
 
 
@@ -6973,11 +6982,9 @@ var
   v: PVarData;
   vv: PVariant;
 begin
-  with TVarData(SourceDocVariant) do
-    if cardinal(VType) = varVariantByRef then
-      Source := VPointer
-    else
-      Source := @SourceDocVariant;
+  Source := @SourceDocVariant;
+  if cardinal(Source^.VType) = varVariantByRef then
+    Source := PVarData(Source)^.VPointer;
   if cardinal(Source^.VType) <> DocVariantVType then
     EDocVariant.RaiseUtf8('Unexpected InitCopy(var%)', [VariantTypeName(PVarData(Source))^]);
   SourceVValue := Source^.VValue; // local fast per-reference copy
@@ -7307,6 +7314,16 @@ begin
   result := (cardinal(VType) = DocVariantVType) and
             GetObjectProp(aName, v{%H-}, nil) and
             (FastVarDataComp(@aValue, pointer(v), aCaseInsensitive) = 0);
+end;
+
+function TDocVariantData.CompareText(const aName, aValue: RawUtf8;
+  aCaseInsensitive: boolean): integer;
+var
+  t: TSynVarData;
+begin
+  t.VType := varString;
+  t.VAny := pointer(aValue);
+  result := Compare(aName, PVariant(@t)^, aCaseInsensitive);
 end;
 
 function TDocVariantData.InternalAddBuf(aName: PUtf8Char; aNameLen: PtrInt): PtrInt;
@@ -7741,6 +7758,18 @@ begin
     DocVariantType.InternValues.UniqueVariant(VValue[result], aValue)
   else
     RawUtf8ToVariant(aValue, VValue[result]); // always RawUtf8
+end;
+
+function TDocVariantData.AddItemRtti(aItem: pointer; aRtti: TRttiCustom;
+  aIndex: integer): integer;
+begin
+  result := -1;
+  if IsObject then
+    exit;
+  result := InternalAdd('', aIndex);
+  if (aItem <> nil) and
+     (aRtti <> nil) then
+    aRtti.ValueToVariant(aItem, PVarData(@VValue[result])^, @VOptions);
 end;
 
 procedure TDocVariantData.AddItems(const aValue: array of const);
@@ -11582,6 +11611,20 @@ begin
   for i := 0 to high(keys) do
     d.fValue^.AddOrUpdateValue(keys[i], value);
   result := d;
+end;
+
+{ IDocAny factories functions }
+
+function DocAny(const json: RawUtf8; model: TDocVariantModel): IDocAny;
+begin
+  case GetFirstJsonToken(pointer(json)) of
+    jtObjectStart:
+      result := DocDict(json, model);
+    jtArrayStart:
+      result := DocList(json, model);
+  else
+    result := nil;
+  end;
 end;
 
 

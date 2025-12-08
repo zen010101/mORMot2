@@ -2501,25 +2501,33 @@ procedure ReplaceSection(SectionFirstLine: PUtf8Char;
   var Content: RawUtf8; const NewSectionContent: RawUtf8); overload;
 
 /// return TRUE if Value of UpperName does exist in P, till end of current section
-// - expect UpperName as 'NAME='
+// - expects UpperName as 'NAME=' or 'HTTPHEADERNAME:'
+// - note: won't ignore spaces/tabs around the '=' sign
 function ExistsIniName(P: PUtf8Char; UpperName: PAnsiChar): boolean;
 
-/// find the Value of UpperName in P, till end of current section
-// - expect UpperName as 'NAME='
+/// find the Value of UpperName in P, till end of current INI section
+// - expect UpperName already as 'NAME=' for efficient INI key=value lookup
+// - will follow INI relaxed expectations, i.e. ignore spaces/tabs around
+// the '=' sign, and at the end of each input text line
 function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
-  const DefaultValue: RawUtf8 = ''): RawUtf8;
+  const DefaultValue: RawUtf8 = ''; PEnd: PUtf8Char = nil): RawUtf8;
 
-/// return TRUE if one of the Value of UpperName exists in P, till end of
-// current section
+/// find the Value of UpperName in Content, wrapping FindIniNameValue()
+function FindIniNameValueU(const Content: RawUtf8; UpperName: PAnsiChar): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// return TRUE if one of the leftmost Value of UpperName exists in P
 // - expect UpperName e.g. as 'CONTENT-TYPE: ' (i.e. HEADER_CONTENT_TYPE_UPPER)
 // - expect UpperValues to be an array of upper values with left side matching,
 // and ending with nil - as expected by IdemPPChar(), i.e. with at least 2 chars
+// - note: won't ignore spaces/tabs around the '=' sign
 function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
   UpperValues: PPAnsiChar): boolean;
 
 /// find the integer Value of UpperName in P, till end of current section
-// - expect UpperName as 'NAME='
+// - expect UpperName as 'NAME=' or 'CONTENT-LENGTH: '
 // - return 0 if no NAME= entry was found
+// - note: won't ignore spaces/tabs around the '=' sign
 function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt;
 
 /// replace a value from a given set of name=value lines
@@ -2527,6 +2535,7 @@ function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt
 // - if no UPPERNAME= entry was found, then Name+NewValue is added to Content
 // - a typical use may be:
 // ! UpdateNameValue(headers,HEADER_CONTENT_TYPE,HEADER_CONTENT_TYPE_UPPER,contenttype);
+// - note: won't ignore spaces/tabs around the '=' sign
 function UpdateNameValue(var Content: RawUtf8;
   const Name, UpperName, NewValue: RawUtf8): boolean;
 
@@ -3860,18 +3869,26 @@ begin
   source := nil;
 end;
 
+function FindIniNameValueU(const Content: RawUtf8; UpperName: PAnsiChar): RawUtf8;
+var
+  p: PUtf8Char absolute Content;
+begin
+  result := FindIniNameValue(p, UpperName, '', p + length(Content));
+end;
+
 function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
-  const DefaultValue: RawUtf8): RawUtf8;
+  const DefaultValue: RawUtf8; PEnd: PUtf8Char): RawUtf8;
 var
   u, PBeg: PUtf8Char;
-  by4: cardinal;
+  l: PtrInt;
   {$ifdef CPUX86NOTPIC}
   table: TNormTable absolute NormToUpperAnsi7;
   {$else}
   table: PNormTable;
   {$endif CPUX86NOTPIC}
-begin
-  // expect UpperName as 'NAME='
+label
+  fnd;
+begin // expects UpperName as 'NAME='
   if (P <> nil) and
      (P^ <> '[') and
      (UpperName <> nil) then
@@ -3882,32 +3899,24 @@ begin
     PBeg := nil;
     u := P;
     repeat
-      while u^ = ' ' do
+      while u^ in [#1 .. ' '] do
         inc(u); // trim left ' '
       if u^ = #0 then
         break;
       if table[u^] = UpperName[0] then
         PBeg := u;
-      repeat
-        by4 := PCardinal(u)^;
-        if ToByte(by4) > 13 then
-          if ToByte(by4 shr 8) > 13 then
-            if ToByte(by4 shr 16) > 13 then
-              if ToByte(by4 shr 24) > 13 then
-              begin
-                inc(u, 4);
-                continue;
-              end
-              else
-                inc(u, 3)
-            else
-              inc(u, 2)
+      {$ifdef CPUX64}
+      if PEnd <> nil then
+        inc(u, BufferLineLength(u, PEnd)) // we can use SSE2
+      else
+      {$endif CPUX64}
+        while true do
+          if u^ > #13 then
+            inc(u)
+          else if u^ in [#0, #10, #13] then
+            break
           else
             inc(u);
-        if u^ in [#0, #10, #13] then
-          break;
-        inc(u);
-      until false;
       if PBeg <> nil then
       begin
         inc(PBeg);
@@ -3915,16 +3924,44 @@ begin
         u := pointer(UpperName + 1);
         repeat
           if u^ <> #0 then
-            if table[PBeg^] <> u^ then
-              break
-            else
+            if table[PBeg^] = u^ then
             begin
               inc(u);
               inc(PBeg);
             end
+            else
+            begin
+              if u^ <> '=' then
+                break;
+              if PBeg^ <> ' ' then
+                if PBeg^ = ':' then // allow ':' within INI (as WinAPI)
+                  goto fnd
+                else
+                  break;
+              repeat // ignore spaces/tabs around the '=' sign
+                inc(PBeg);
+                case PBeg^ of
+                  #1 .. ' ':
+                    continue;
+                  '=', ':':
+                    goto fnd;
+                else
+                  break;
+                end;
+              until false;
+              break;
+            end
           else
           begin
-            FastSetString(result, PBeg, P - PBeg);
+            if PBeg^ in [#1 .. ' '] then
+              repeat
+fnd:            inc(PBeg); // should ignore spaces/tabs after the '=' sign
+              until not (PBeg^ in [#1 .. ' ']);
+            l := P - PBeg;
+            while (l > 0) and
+                  (PBeg[l - 1] in [#1 .. ' ']) do
+              dec(l);      // should trim spaces/tabs at the end of the line
+            FastSetString(result, PBeg, l);
             exit;
           end;
         until false;
@@ -4021,12 +4058,10 @@ begin
           inc(P)
         until P^ <> ' '; // trim left ' '
       if IdemPChar2(table, P, pointer(UpperName)) then
-      begin
-        inc(P, length(UpperName));
-        if IdemPPChar(P, UpperValues) >= 0 then
-          exit; // found one value
-        break;
-      end;
+        if IdemPPChar(GotoNextNotSpace(P + length(UpperName)), UpperValues) >= 0 then
+          exit // found one value
+        else
+          break;
       P := GotoNextLine(P);
     end;
   end;
@@ -4154,24 +4189,25 @@ end;
 
 function FindIniEntry(const Content, Section, Name, DefaultValue: RawUtf8): RawUtf8;
 var
-  P: PUtf8Char;
+  P, PEnd: PUtf8Char;
   UpperSection, UpperName: TByteToAnsiChar;
 begin
   result := DefaultValue;
   P := pointer(Content);
   if P = nil then
     exit;
+  PEnd := P + length(Content);
   // fast UpperName := UpperCase(Name)+'='
   PWord(UpperCopy255(UpperName{%H-}, Name))^ := ord('=');
   if Section = '' then
     // find the Name= entry before any [Section]
-    result := FindIniNameValue(P, UpperName, DefaultValue)
+    result := FindIniNameValue(P, UpperName, DefaultValue, PEnd)
   else
   begin
     // find the Name= entry in the specified [Section]
     PWord(UpperCopy255(UpperSection{%H-}, Section))^ := ord(']');
     if FindSectionFirstLine(P, UpperSection) then
-      result := FindIniNameValue(P, UpperName, DefaultValue);
+      result := FindIniNameValue(P, UpperName, DefaultValue, PEnd);
   end;
 end;
 
@@ -4327,7 +4363,7 @@ var
   r: TRttiCustom;
   i: integer;
   p: PRttiCustomProp;
-  section, nested, json: PUtf8Char;
+  section, iniend, nested, json: PUtf8Char;
   name: PAnsiChar;
   n, v: RawUtf8;
   up: TByteToAnsiChar;
@@ -4338,6 +4374,7 @@ begin
     exit;
   PWord(UpperCopy255(up{%H-}, SectionName))^ := ord(']');
   section := pointer(Ini);
+  iniend := section + length(Ini);
   if not FindSectionFirstLine(section, @up) then
     exit; // section not found
   r := Rtti.RegisterClass(Instance);
@@ -4359,7 +4396,7 @@ begin
       else
       begin
         PWord(UpperCopy255(up{%H-}, p^.Name))^ := ord('=');
-        v := FindIniNameValue(section, @up, #0);
+        v := FindIniNameValue(section, @up, #0, iniend);
         if p^.Value.Parser in ptMultiLineStringTypes then
         begin
           if v = #0 then // may be stored in a multi-line section body

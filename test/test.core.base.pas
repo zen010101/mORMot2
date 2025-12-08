@@ -885,6 +885,8 @@ var
   Content, S, N, V: RawUtf8;
   Si, Ni, Vi, i, j: integer;
   P: PUtf8Char;
+const
+  VUP: array[0..3] of PAnsiChar = ('VALUE', 'value', 'value2', nil);
 begin
   Content := '';
   for i := 1 to 1000 do
@@ -912,6 +914,24 @@ begin
     exit;
   S := StringFromFile(WorkDir + 'test2.ini');
   Check(S = Content, WorkDir + 'test2.ini');
+  Content := 'name=value'#13#10' name2= value2 '#13#10 +
+             ' name 3  =  value3 '#13#10' name4: value 4 '#13#10;
+  CheckEqual(FindIniNameValueU(Content, 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU(Content, 'NAME2='), 'value2');
+  CheckEqual(FindIniNameValueU(Content, 'NAME3='), '');
+  CheckEqual(FindIniNameValueU(Content, 'NAME 3='), 'value3');
+  CheckEqual(FindIniNameValueU(Content, 'NAME4='), 'value 4');
+  CheckEqual(FindIniNameValueU(Content, 'NAME4:'), 'value 4');
+  Check(ExistsIniNameValue(pointer(Content), 'NAME=', @VUP));
+  Check(ExistsIniNameValue(pointer(Content), 'NAME2=', @VUP));
+  Check(not ExistsIniNameValue(pointer(Content), 'NAME3=', @VUP));
+  Check(not ExistsIniNameValue(pointer(Content), 'NAME 3=', @VUP));
+  Check(ExistsIniNameValue(pointer(Content), 'NAME 3  =', @VUP));
+  Check(not ExistsIniNameValue(pointer(Content), 'NAME  3  =', @VUP));
+  CheckEqual(FindIniNameValueU('name=value', 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU('name = value', 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU('toto='#10'name = value ', 'NAME='), 'value');
+  CheckEqual(FindIniNameValueU('toto='#10'name = ', 'NAME='), '');
   Content := 'abc'#13#10'def'#10'ghijkl'#13'1234567890';
   P := pointer(Content);
   Check(GetNextLine(P, P) = 'abc');
@@ -2480,15 +2500,17 @@ var
   m: TRttiMap;
   fo, fr: TRttiFilter;
   err, err2: string;
+  oa: TOrmPeopleObjArray;
+  pa: array of TRecordPeople;
 begin
   // FillZeroRtti()
-  CheckEqual(lic.CustomerName, '');
+  CheckEqual(lic.CustomerName, '', 'c1');
   lic.CustomerName := 'Toto';
   FillZeroRtti(TypeInfo(TLicenseData), lic);
-  CheckEqual(lic.CustomerName, '');
+  CheckEqual(lic.CustomerName, '', 'c2');
   lic.CustomerName := '1234';
   FillZeroRtti(TypeInfo(TLicenseData), lic);
-  CheckEqual(lic.CustomerName, '');
+  CheckEqual(lic.CustomerName, '', 'c3');
   // validate RecordCopy()
   FillCharFast(A, SizeOf(A), 0);
   FillCharFast(B, SizeOf(B), 0);
@@ -2506,8 +2528,8 @@ begin
   SetLength(A.Dyn, 10);
   A.Dyn[9] := 9;
   RecordCopy(B, A, TypeInfo(TR)); // mORMot 2 doesn't overload RecordCopy()
-  Check(A.One = B.One);
-  Check(A.S1 = B.S1);
+  Check(A.One = B.One, 'c4');
+  Check(A.S1 = B.S1, 'c5');
   Check(A.Three = B.Three);
   Check(A.S2 = B.S2);
   Check(A.Five = B.Five);
@@ -2549,7 +2571,7 @@ begin
   B.Three := 3;
   B.Dyn[0] := 10;
   RecordCopy(C, B, TypeInfo(TR)); // mORMot 2 doesn't overload RecordCopy()
-  CheckEqual(A.One, C.One);
+  CheckEqual(A.One, C.One, 'c6');
   Check(A.S1 = C.S1);
   CheckEqual(C.Three, 3);
   Check(A.S2 = C.S2);
@@ -2570,8 +2592,8 @@ begin
     o1.YearOfBirth := 1926;
     o1.YearOfDeath := 2010;
     CopyObject(o1, o2);
-    CheckEqual(o1.FirstName, 'toto');
-    Check(o2.FirstName = 'toto');
+    CheckEqual(o1.FirstName, 'toto', 'c7');
+    Check(o2.FirstName = 'toto', 'c8');
     CheckEqual(o1.LastName, 'titi');
     CheckEqual(o1.LastName, o2.LastName);
     CheckEqual(o1.YearOfBirth, o2.YearOfBirth);
@@ -2580,18 +2602,18 @@ begin
     p.YearOfBirth := -1;
     CheckEqual(p.YearOfBirth, -1);
     RecordZero(@p, TypeInfo(TRecordPeople));
-    CheckEqual(p.FirstName, '');
+    CheckEqual(p.FirstName, '', 'c9');
     CheckEqual(p.LastName, '');
     CheckEqual(p.YearOfBirth, 0);
     CheckEqual(p.YearOfDeath, 0);
     ObjectToRecord(o2, p, TypeInfo(TRecordPeople));
-    CheckEqual(p.FirstName, 'toto');
+    CheckEqual(p.FirstName, 'toto', 'c10');
     CheckEqual(p.LastName, 'titi');
     CheckEqual(p.YearOfBirth, o2.YearOfBirth);
     CheckEqual(p.YearOfDeath, o2.YearOfDeath);
     o2.Enum := e1;
     ClearObject(o2);
-    Check(o2.FirstName = '');
+    Check(o2.FirstName = '', 'c11');
     CheckEqual(o2.LastName, '');
     CheckEqual(o2.YearOfBirth, 0);
     CheckEqual(o2.YearOfDeath, 0);
@@ -2733,6 +2755,23 @@ begin
     o1.Free;
     o2.Free;
   end;
+  // TRttiMap.ToArrayA/B methods
+  Check(oa = nil);
+  Check(pa = nil);
+  m.ToArrayA(oa, pa);
+  Check(oa = nil);
+  Check(pa = nil);
+  m.ToArrayB(oa, pa);
+  Check(oa = nil);
+  Check(pa = nil);
+  SetLength(pa, 1);
+  pa[0] := p;
+  m.ToArrayA(oa, pa);
+  CheckEqual(length(oa), 1);
+  Check(oa[0] <> nil);
+  CheckEqual(oa[0].FirstName, p.FirstName);
+  CheckEqual(m.Compare(oa[0], @pa[0]), 0, 'array1');
+  ObjArrayClear(oa);
   // TRttiFilter validation with p record
   fr := TRttiFilter.Create(TypeInfo(TRecordPeople));
   try
@@ -4020,7 +4059,8 @@ begin
   {$endif OSDARWIN}
   {$ifdef CPUX64}
   if (cfSSE42 in CpuFeatures) and
-     (cfAesNi in CpuFeatures) then
+     (cfAesNi in CpuFeatures) and
+     (cfCLMUL in CpuFeatures) then
     Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
   {$endif CPUX64}
   {$else}

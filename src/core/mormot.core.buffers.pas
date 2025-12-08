@@ -814,7 +814,7 @@ type
   /// available kind of integer array storage, corresponding to the data layout
   // of TBufferWriter
   // - wkUInt32 will write the content as "plain" 4 bytes binary (this is the
-  // prefered way if the integers can be negative)
+  // preferred way if the integers can be negative)
   // - wkVarUInt32 will write the content using our 32-bit variable-length integer
   // encoding
   // - wkVarInt32 will write the content using our 32-bit variable-length integer
@@ -952,7 +952,7 @@ type
     procedure WriteVarInt64(Value: Int64);
     /// append an unsigned integer value using 64-bit variable-length encoding
     procedure WriteVarUInt64(Value: QWord);
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// append cardinal values (NONE must be negative!) using 32-bit
     // variable-length integer encoding or other specialized algorithm,
     // depending on the data layout
@@ -1247,6 +1247,15 @@ function BinToBase64uri(const s: RawByteString; enc: PChar64 = nil): RawUtf8; ov
 // - in comparison to Base64 standard encoding, will trim any right-sided '='
 // unsignificant characters, and replace '+' or '/' by '_' or '-'
 function BinToBase64uri(Bin: PAnsiChar; BinBytes: integer; enc: PChar64 = nil): RawUtf8; overload;
+
+/// fast conversion from a 128-bit buffer into Base64-like URI-compatible encoded text
+function BinToBase64uri(const Bin: THash128; enc: PChar64 = nil): RawUtf8; overload;
+
+/// fast conversion from a 256-bit buffer into Base64-like URI-compatible encoded text
+function BinToBase64uri(const Bin: THash256; enc: PChar64 = nil): RawUtf8; overload;
+
+/// fast conversion from a 512-bit buffer into Base64-like URI-compatible encoded text
+function BinToBase64uri(const Bin: THash512; enc: PChar64 = nil): RawUtf8; overload;
 
 /// fast conversion from a binary buffer into Base64-like URI-compatible encoded ShortString
 // - in comparison to Base64 standard encoding, will trim any right-sided '='
@@ -6986,6 +6995,21 @@ begin
       Bin, BinBytes, enc)
   else
     FastAssignNew(result);
+end;
+
+function BinToBase64uri(const Bin: THash128; enc: PChar64): RawUtf8;
+begin
+  Base64uriEncode(FastSetString(result, 22), @Bin, SizeOf(Bin), enc)
+end;
+
+function BinToBase64uri(const Bin: THash256; enc: PChar64): RawUtf8;
+begin
+  Base64uriEncode(FastSetString(result, 43), @Bin, SizeOf(Bin), enc)
+end;
+
+function BinToBase64uri(const Bin: THash512; enc: PChar64): RawUtf8;
+begin
+  Base64uriEncode(FastSetString(result, 86), @Bin, SizeOf(Bin), enc)
 end;
 
 function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer; enc: PChar64): ShortString;

@@ -692,7 +692,7 @@ type
     fNoEnvironmentVariable: boolean;
     {$endif OSWINDOWS}
     {$ifndef NOEXCEPTIONINTERCEPT}
-    fHandleExceptions: boolean;
+    fHandleExceptions, fExceptionIgnoreLibrary: boolean;
     fOnBeforeException: TOnBeforeException;
     {$endif NOEXCEPTIONINTERCEPT}
     fAutoFlushTimeOut: cardinal;
@@ -736,7 +736,7 @@ type
     function GetCurrentThreadFlag(ti: TSynLogThreadInfoFlag): boolean;
     procedure SetCurrentThreadFlag(ti: TSynLogThreadInfoFlag; value: boolean);
   public
-    /// intialize for a TSynLog class family
+    /// initialize for a TSynLog class family
     // - add it in the global SynLogFileFamily[] list
     constructor Create(aSynLog: TSynLogClass);
     /// close any console echo, and release associated memory
@@ -798,6 +798,10 @@ type
     // to this flag
     property ExceptionIgnoreCurrentThread: boolean
       index tiExceptionIgnore read GetCurrentThreadFlag write SetCurrentThreadFlag;
+    /// set true will log exceptions only from the main executable, not from library
+    // - will follow IsMainExecutable() result
+    property ExceptionIgnoreLibrary: boolean
+      read fExceptionIgnoreLibrary write fExceptionIgnoreLibrary;
     /// allow to temporarly avoid logging in the current thread
     // - won't affect exceptions logging, as one would expect for safety reasons
     // - after setting true to this property, should eventually be reset to false:
@@ -1153,7 +1157,7 @@ type
     function ConsoleEcho(Sender: TEchoWriter; Level: TSynLogLevel;
       const Text: RawUtf8): boolean; virtual;
   public
-    /// intialize for a TSynLog class instance
+    /// initialize for a TSynLog class instance
     // - WARNING: not to be called directly! Use TSynLog.Enter or TSynLog.Add
     // class functions instead
     constructor Create(aFamily: TSynLogFamily = nil); virtual;
@@ -4023,7 +4027,7 @@ begin
         end;
     end;
   until Terminated;
-  // Terminated is set: eventually display delayed console ouput
+  // Terminated is set: eventually display delayed console output
   try
     FlushConsole;
   except
@@ -5505,14 +5509,14 @@ begin
     if pendingDisableRemoteLogLeave in fPendingFlags then
     begin
       GlobalThreadLock.UnLock;
-      ESynLogException.RaiseUtf8('Nested %.DisableRotemoteLog', [self]);
+      ESynLogException.RaiseUtf8('Nested %.DisableRemoteLog', [self]);
     end;
     include(fPendingFlags, pendingDisableRemoteLogLeave);
   end
   else
   begin
     if not (pendingDisableRemoteLogLeave in fPendingFlags) then
-      ESynLogException.RaiseUtf8('Missing %.DisableRotemoteLog(true)', [self]);
+      ESynLogException.RaiseUtf8('Missing %.DisableRemoteLog(true)', [self]);
     // DisableRemoteLog(false) -> add to events, and quit the global mutex
     exclude(fPendingFlags, pendingDisableRemoteLogLeave);
     fWriterEcho.EchoAdd(fFamily.fEchoRemoteEvent);
@@ -5857,7 +5861,7 @@ var
 begin
   fWriter.AddDirect(' ', '"');
   GetErrorShortVar(Error, msg);
-  fWriter.AddOnSameLine(@msg[0], ord(msg[0]));
+  fWriter.AddOnSameLine(@msg[1], ord(msg[0]));
   fWriter.AddDirect('"', ' ', '(');
   fWriter.AddU(Error);
   fWriter.AddDirect(')', ' ');
@@ -6490,7 +6494,11 @@ begin
     exit; // disabled for this thread (avoid nested call)
   log := HandleExceptionFamily.Add;
   if log = nil then
-   exit;
+    exit;
+  if log.fFamily.ExceptionIgnoreLibrary and
+     (Ctxt.EAddr <> 0) and
+     not IsMainExecutable(pointer(Ctxt.EAddr)) then // fast guess
+    exit;
   thrdnam := CurrentThreadNameShort;
   log.LockAndDisableExceptions; // ignore result = tiTemporaryDisable flag
   try

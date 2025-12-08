@@ -8,6 +8,8 @@
 
 { ****************** Unicode, Time, File process }
 
+{$Z4} // enumerates should be DWORD / 32-bit - see jediapilib.inc
+
 function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
   overload; forward;
 procedure _fmt(const Fmt: string; const Args: array of const;
@@ -1010,13 +1012,23 @@ var
   hm: HMODULE;
 begin
   result := '';
-  FillcharFast(tmp, SizeOf(tmp), 0);
   hm := 0;
   if not GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT or
            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) then
     exit;
+  FillcharFast(tmp, SizeOf(tmp), 0);
   GetModuleFileNameW(hm, tmp, SizeOf(tmp));
   Win32PWideCharToFileName(tmp, result);
+end;
+
+function IsMainExecutable(aAddress: pointer): boolean;
+var
+  hm: HMODULE;
+begin
+  hm := 0;
+  result := GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT or
+              GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) and
+            (hm = HINSTANCE);
 end;
 
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -2142,7 +2154,7 @@ type
     th32ModuleID:DWord;            // associated exe
     cntThreads: DWord;
     th32ParentProcessID: DWord;    // this process's parent process
-    pcPriClassBase: integer;          // Base priority of process's threads
+    pcPriClassBase: integer;       // base priority of process's threads
     dwFlags: DWord;
     szExeFile: array [0..MAX_PATH - 1] of WideChar;   // Path
   end;
@@ -2151,7 +2163,7 @@ type
     dwSize: DWord;
     cntUsage: DWord;
     th32ThreadID: DWord;       // this thread
-    th32OwnerProcessID: DWord; // Process this thread is associated with
+    th32OwnerProcessID: DWord; // process this thread is associated with
     tpBasePri: integer;
     tpDeltaPri: integer;
     dwFlags: DWord;
@@ -2635,28 +2647,24 @@ end;
 
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 var
-  events, read: DWord;
+  read: DWord;
   rec: TInputRecord;
   h: THandle;
 begin
   result := false;
   h := GetStdHandle(STD_INPUT_HANDLE);
-  events := 0;
-  GetNumberOfConsoleInputEvents(h, events);
-  if events <> 0 then
-  begin
-    PeekConsoleInput(h, rec, 1, read);
-    if read <> 0 then
-      if rec.EventType = KEY_EVENT then
-        if rec.Event.KeyEvent.bKeyDown and
-           ((ExpectedKey = 0) or
-            (rec.Event.KeyEvent.wVirtualKeyCode = ExpectedKey)) then
-          result := true
-        else
-          FlushConsoleInputBuffer(h)
-      else
-        FlushConsoleInputBuffer(h);
-  end;
+  repeat
+    read := 0;
+    if not PeekConsoleInput(h, rec, 1, read) or
+       (read = 0) then
+      exit;
+    ReadConsoleInput(h, rec, 1, read); // consume the event
+    if rec.EventType = KEY_EVENT then
+      if rec.Event.KeyEvent.bKeyDown and
+         ((ExpectedKey = 0) or
+          (rec.Event.KeyEvent.wVirtualKeyCode = ExpectedKey)) then
+        result := true;
+  until result; // keep draining the queue if the key was not pressed
 end;
 
 type
@@ -4234,7 +4242,7 @@ end;
 var
   OnHandleCtrlC: TThreadMethod;
 
-function ConsoleCtrlHandler(typ : DWord) : BOOL; stdcall;
+function ConsoleCtrlHandler(typ: DWord): BOOL; stdcall;
 begin
   result := false;
   if Assigned(OnHandleCtrlC) then
@@ -4778,12 +4786,13 @@ type
     CacheInstruction,
     CacheData,
     CacheTrace);
-
-  {$ifdef CPU64}
-  {$A8}
-  {$else}
-  {$A4}
-  {$endif CPU64}
+  TSystemCacheDescriptor = packed record
+    Level: byte;
+    Associativity: byte;
+    LineSize: Word;
+    Size: DWord;
+    CacheType: TSystemLogicalProcessorCache;
+  end;
   TSystemLogicalProcessorInformation = record
     ProcessorMask: PtrUInt;
     case Relationship: TSystemLogicalProcessorRelation of
@@ -4792,18 +4801,10 @@ type
       RelationNumaNode: (
         NumaNodeNumber: DWord);
       RelationCache: (
-        Cache: record
-          Level: byte;
-          Associativity: byte;
-          LineSize: Word;
-          Size: DWord;
-          CacheType: TSystemLogicalProcessorCache;
-        end);
+        Cache: TSystemCacheDescriptor);
       RelationGroup: (
         Reserved: array [0..1] of QWord); // to define the actual struct size
   end;
-  {$A+}
-
 
 {$ifndef UNICODE}
 function GetVersionEx(var lpVersionInformation: TOSVersionInfoEx): BOOL;
@@ -4831,7 +4832,7 @@ begin // where to cache our computed UUID as a local file
   result := GetSystemPath(spCommonData) + 'synopse.uuid';
 end;
 
-const
+const // https://learn.microsoft.com/en-us/windows/win32/sysinfo/image-file-machine-constants
   IMAGE_FILE_MACHINE_UNKNOWN = 0; // if the process is not under WOW64
   IMAGE_FILE_MACHINE_I386    = $014c;
   IMAGE_FILE_MACHINE_AMD64   = $8664;
@@ -4899,17 +4900,14 @@ begin
     @GetNativeSystemInfo := nil;
   // see https://learn.microsoft.com/en-us/windows/arm/apps-on-arm-x86-emulation
   IsWow64Process2 := LibraryResolve(h, 'IsWow64Process2'); // Windows 10+
-  process := 0; // = IMAGE_FILE_MACHINE_UNKNOWN if not under WOW64
-  machine := 0;
-  IsWow64Emulation := Assigned(IsWow64Process2) and
+  process := 0;
+  machine := IMAGE_FILE_MACHINE_UNKNOWN; // default = not under WOW64
+  IsWow64Emulation :=
+    Assigned(IsWow64Process2) and
     IsWow64Process2(GetCurrentProcess, process, machine) and
-    {$ifdef CPUINTEL}
-    (machine <> IMAGE_FILE_MACHINE_I386) and
-    (machine <> IMAGE_FILE_MACHINE_AMD64); // detecting PRISM is enough by now
-    {$else}
+    {$ifdef CPUINTEL} not {$endif} // detecting PRISM is enough by now
     ((machine = IMAGE_FILE_MACHINE_I386) or
      (machine = IMAGE_FILE_MACHINE_AMD64));
-    {$endif CPUINTEL}
   // Vista+ kernel32.dll APIs
   GetTickCount64 := LibraryResolve(h, 'GetTickCount64'); // Vista+
   if not Assigned(GetTickCount64) then
@@ -5023,7 +5021,11 @@ begin
     begin
       OSVersionInfoEx := wine_get_version;
       OSVersionInfoEx := TrimU('Wine ' + TrimU(OSVersionInfoEx));
-    end;
+    end
+    {$ifdef CPUINTEL}
+    else if IsWow64Emulation then
+       OSVersionInfoEx := 'Prism'
+    {$endif CPUINTEL};
   end;
   // 4. retrieve Software/Hardware information from Registry
   if reg.ReadOpen(wrLocalMachine, 'Software\Microsoft\Windows NT\CurrentVersion') then
