@@ -1615,7 +1615,7 @@ begin
   else
     SleepStep(starttix);
   result := (wpfDestroying in fWaitPopFlags) or // no need to lock/unlock
-            (GetTickCount64 > endtix);
+            (mormot.core.os.GetTickCount64 > endtix);
 end;
 
 function TSynQueue.WaitPop(aTimeoutMS: integer; const aWhenIdle: TThreadMethod;
@@ -1626,7 +1626,7 @@ begin
   result := false;
   if not InternalDestroying(+1) then
   try
-    starttix := GetTickCount64;
+    starttix := mormot.core.os.GetTickCount64;
     endtix := starttix + aTimeoutMS;
     repeat
       if Assigned(aCompared) and
@@ -1649,7 +1649,7 @@ begin
   result := nil;
   if not InternalDestroying(+1) then
   try
-    starttix := GetTickCount64;
+    starttix := mormot.core.os.GetTickCount64;
     endtix := starttix + aTimeoutMS;
     repeat
       if fFirst >= 0 then
@@ -1682,12 +1682,12 @@ begin
   finally
     fSafe.WriteUnLock;
   end;
-  starttix := GetTickCount64;
+  starttix := mormot.core.os.GetTickCount64;
   endtix := starttix + aTimeoutMS;
   repeat
     SleepStep(starttix); // ensure WaitPos() is actually finished
   until (fWaitPopCounter = 0) or
-        (GetTickCount64 > endtix);
+        (mormot.core.os.GetTickCount64 > endtix);
 end;
 
 procedure TSynQueue.Save(out aDynArrayValues; aDynArray: PDynArray);
@@ -1812,7 +1812,7 @@ end;
 
 function TPendingTaskList.GetTimestamp: Int64;
 begin
-  result := GetTickCount64;
+  result := mormot.core.os.GetTickCount64;
 end;
 
 procedure TPendingTaskList.AddTask(aMilliSecondsDelayFromNow: integer;
@@ -2191,11 +2191,11 @@ var
 begin
   if fExecute = exRun then
   begin
-    endtix := GetTickCount64 + maxMS;
+    endtix := mormot.core.os.GetTickCount64 + maxMS;
     repeat
       SleepHiRes(1); // wait for Execute to finish
     until (fExecute <> exRun) or
-          (GetTickCount64 >= endtix);
+          (mormot.core.os.GetTickCount64 >= endtix);
   end;
 end;
 
@@ -2349,7 +2349,7 @@ end;
 function TSynBackgroundThreadMethodAbstract.OnIdleProcessNotify(
   var start: Int64): Int64;
 begin
-  result := GetTickCount64;
+  result := mormot.core.os.GetTickCount64;
   if start = 0 then
     result := start;
   dec(result, start);
@@ -2603,7 +2603,7 @@ begin
   if (fTask = nil) or
      Terminated then
     exit;
-  tix := GetTickCount64;
+  tix := mormot.core.os.GetTickCount64;
   n := 0;
   LockedInc32(@fProcessingCounter);
   try
@@ -2690,7 +2690,7 @@ begin
   end;
   task.OnProcess := aOnProcess;
   task.Secs := aOnProcessSecs;
-  task.NextTix := GetTickCount64 + (aOnProcessSecs * 1000 - TIXPRECISION);
+  task.NextTix := mormot.core.os.GetTickCount64 + (aOnProcessSecs * 1000 - TIXPRECISION);
   task.MsgSafe.Init; // required since task is on stack
   fTasks.Safe.WriteLock;
   try
@@ -3189,6 +3189,7 @@ end;
 function TSynThread.SleepOrTerminated(MS: cardinal): boolean;
 var
   endtix: Int64;
+  step, remaining: integer;
 begin
   result := true; // notify Terminated
   if Terminated then
@@ -3202,12 +3203,18 @@ begin
   end
   else
   begin
-    endtix := GetTickCount64 + MS;
+    step := 0;
+    endtix := mormot.core.os.GetTickCount64 + MS;
     repeat
-      SleepHiRes(10);
+      if step < 200 then
+        inc(step, 10); // steps = 10..200 = up to total 2100 ms
+      SleepHiRes(step);
       if Terminated then
         exit;
-    until GetTickCount64 > endtix;
+      remaining := endtix - mormot.core.os.GetTickCount64;
+      if remaining < step then
+        step := remaining;
+    until remaining <= 0;
   end;
   result := false; // MS timeout
 end;
@@ -3609,20 +3616,20 @@ end;
 
 function TLoggedWorker.RunWait(TimeoutSec: integer; CallSynchronize: boolean): boolean;
 var
-  endtix: Int64;
+  endtix: cardinal;
 begin
   result := (self = nil) or
             (fRunning = 0);
   if result then
     exit;
-  endtix := TimeoutSec shl 10;
+  endtix := TimeoutSec;
   if endtix <> 0 then
-    inc(endtix, GetTickCount64()); // never wait forever
+    inc(endtix, GetTickSec); // never wait forever
   CallSynchronize := CallSynchronize and
                      (GetCurrentThreadID = MainThreadID);
   while fRunning <> 0 do
     if (endtix <> 0) and
-       (GetTickCount64 > endtix) then
+       (GetTickSec > endtix) then
       exit // result = false on timeout
     else if CallSynchronize then
       CheckSynchronize(1)
@@ -3681,7 +3688,7 @@ end;
 destructor TSynThreadPool.Destroy;
 var
   i: PtrInt;
-  endtix: Int64;
+  endtix: cardinal;
 begin
   fTerminated := true; // fWorkThread[].Execute will check this flag
   try
@@ -3699,9 +3706,9 @@ begin
       TaskAbort(fPendingContext[i]);
     {$endif USE_WINIOCP}
     // wait for threads to finish, with 30 seconds TimeOut
-    endtix := GetTickCount64 + 30000;
+    endtix := GetTickSec + 30;
     while (fRunningThreads > 0) and
-          (GetTickCount64 < endtix) do
+          (GetTickSec < endtix) do
       SleepHiRes(5);
     for i := 0 to fWorkThreadCount - 1 do
       fWorkThread[i].Free;
@@ -3782,7 +3789,7 @@ begin
   if (fContentionAbortDelay > 0) and
      aWaitOnContention then
   begin
-    tix := GetTickCount64;
+    tix := mormot.core.os.GetTickCount64;
     starttix := tix;
     endtix := tix + fContentionAbortDelay; // default 5 sec
     repeat
@@ -3791,7 +3798,7 @@ begin
         SleepHiRes(1)
       else
         SleepHiRes(10);
-      tix := GetTickCount64;
+      tix := mormot.core.os.GetTickCount64;
       if fTerminated then
         exit;
       if Enqueue then

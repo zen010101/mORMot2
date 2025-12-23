@@ -1132,7 +1132,7 @@ type
   // - set the memory cache settings if used as exact THttpProxyMem class
   THttpProxyMem = class(TSynPersistent)
   protected
-    fMaxSize: Int64;
+    fMaxSizeKB: integer;
     fTimeoutSec: integer;
     fIgnoreCsv, fForceCsv: RawUtf8;
     fIgnore, fForce: TUriMatch; // parsed fIgnoreCsv, fForceCsv
@@ -1142,14 +1142,14 @@ type
     /// check the IgnoreCsv and ForceCSv properties against a given URI
     function FromUri(const uri: TUriMatchName): THttpProxyCacheKind;
   published
-    /// size (in bytes) below which the file should be included in this cache
+    /// size (in kilobytes) below which the file should be included in this cache
     // - default -1 will use the main THttpProxyServerSettings value
-    property MaxSize: Int64
-      read fMaxSize write fMaxSize;
+    property MaxSizeKB: integer
+      read fMaxSizeKB write fMaxSizeKB default -1;
     /// how many seconds this file should remain in this cache
     // - default -1 will use the main THttpProxyServerSettings value
     property TimeoutSec: integer
-      read fTimeoutSec write fTimeoutSec;
+      read fTimeoutSec write fTimeoutSec default -1;
     /// CSV list of GLOB file names to be excluded to this cache
     // - e.g. '*.changelog,*.tmp'
     property IgnoreCsv: RawUtf8
@@ -1296,6 +1296,8 @@ type
     property DiskCache: THttpProxyDisk
       read fDiskCache write fDiskCache;
   end;
+  /// store a dynamic array of THttpProxyUrlSettings instances
+  THttpProxyUrlSettingsObjArray = array of THttpProxyUrlSettings;
 
   /// the available high-level options for THttpProxyServerMainSettings
   // - psoLogVerbose could be used to debug a server in production
@@ -1390,9 +1392,7 @@ type
     fServer: THttpProxyServerMainSettings;
     fMemCache: THttpProxyMem;
     fDiskCache: THttpProxyDisk;
-    fUrl: THttpProxyUrlObjArray;
-    fOwner: THttpProxyServer;
-    procedure SetOwner(aOwner: THttpProxyServer);
+    fUrl: THttpProxyUrlSettingsObjArray;
   public
     /// initialize the default settings
     constructor Create; override;
@@ -1413,9 +1413,6 @@ type
     // - returns the number of added THttpProxyUrl instances into Url[]
     function AddFromFiles(const settingsfolder: TFileName;
       const mask: TFileName = '*.json'): integer;
-    /// the associated THttpProxyServer main instance (if any)
-    property Owner: THttpProxyServer
-      read fOwner write SetOwner;
   published
     /// define the HTTP/HTTPS server configuration
     property Server: THttpProxyServerMainSettings
@@ -1429,9 +1426,9 @@ type
     // - can be overriden by Url[].DiskCache property
     property DiskCache: THttpProxyDisk
       read fDiskCache write fDiskCache;
-    /// access the remote content sources process as THttpProxyUrl instances
+    /// access the remote content sources settings
     // - owned as a TSynAutoCreateFields dynarray
-    property Url: THttpProxyUrlObjArray
+    property Url: THttpProxyUrlSettingsObjArray
       read fUrl;
   end;
 
@@ -1490,15 +1487,16 @@ type
   EHttpProxyServer = class(ESynException);
 
   /// implements a HTTP server with forward proxy and caching
-  THttpProxyServer = class(TSynAutoCreateFields)
+  THttpProxyServer = class(TSynPersistent)
   protected
     fSettings: THttpProxyServerSettings;
+    fUrl: THttpProxyUrlObjArray;
     fLog: TSynLogClass;
     fSettingsOwned, fHasLog: boolean;
+    fSources: THttpProxySources;
     fServer: THttpAsyncServer;
     fGC: TObjectDynArray;
     fPartials: THttpPartials;
-    fSources: THttpProxySources;
     function SetupTls(var tls: TNetTlsContext): boolean; virtual;
     procedure AfterServerStarted; virtual;
     procedure OnIdle(Sender: TObject; NowTix: Int64);
@@ -1528,6 +1526,9 @@ type
     /// access to the used settings
     property Settings: THttpProxyServerSettings
       read fSettings;
+    /// access to the defined source URIs process, set between Start/Stop calls
+    property Url: THttpProxyUrlObjArray
+      read fUrl;
   end;
 
 function ToText(hps: THttpProxySource): PShortString; overload;
@@ -5333,6 +5334,8 @@ begin
     fLogger.OnIdle(fAsync.fLastOperationMS) // = ProcessIdleTix() GetTickCount64
   else if fAnalyzer <> nil then
     fAnalyzer.OnIdle(fAsync.fLastOperationMS);
+  if Assigned(fOnIdle) then
+    fOnIdle(self, fAsync.fLastOperationMS); // custom callback
   // clean interned HTTP headers at least every 16 secs
   if (fInterning <> nil) and
      (fAsync <> nil) then
@@ -5474,7 +5477,7 @@ end;
 constructor THttpProxyMem.Create;
 begin
   inherited Create;
-  fMaxSize := -1; // use main THttpProxyServerSettings value
+  fMaxSizeKB := -1; // use main THttpProxyServerSettings value
   fTimeoutSec := -1;
 end;
 
@@ -5517,7 +5520,7 @@ constructor THttpProxyUrl.Create(aSettings: THttpProxyUrlSettings;
 begin
   inherited Create;
   fSafe.Init;
-  fSettings := aSettings; // will be owned by this instance from now on
+  fSettings := aSettings;
   fOwner := aOwner;
 end;
 
@@ -5527,7 +5530,7 @@ begin
   FreeAndNil(fMemCache);
   FreeAndNil(fHashCache);
   FreeAndNil(fHeadCache);
-  FreeAndNil(fSettings);
+  // fSettings are owned by THttpProxyServerSettings.Url[]
   fSafe.Done; // mandatory for TOSLightLock
 end;
 
@@ -5891,7 +5894,7 @@ begin
   pck := fSettings.MemCache.FromUri(uri);
   if not (pckIgnore in pck) then
     if (pckForce in pck) or
-       (size <= fSettings.MemCache.MaxSize) then
+       (size <= Int64(fSettings.MemCache.MaxSizeKB) shl 10) then
       FromCache;
 end;
 
@@ -5923,20 +5926,12 @@ end;
 
 constructor THttpProxyServerSettings.Create;
 begin
+  // redirect to AutoCreateFields(self);
   inherited Create;
   // set default values in this main instance
   fDiskCache.Path := Executable.ProgramFilePath + 'proxycache';
-  fMemCache.MaxSize := 4096;
+  fMemCache.MaxSizeKB := 4;
   fMemCache.TimeoutSec := 15 * SecsPerMin;
-end;
-
-procedure THttpProxyServerSettings.SetOwner(aOwner: THttpProxyServer);
-var
-  i: PtrInt;
-begin
-  fOwner := aOwner;
-  for i := 0 to high(fUrl) do
-    fUrl[i].fOwner := aOwner;
 end;
 
 function THttpProxyServerSettings.AddUrl(
@@ -5948,8 +5943,8 @@ begin
        not Assigned(result.OnRequest) then
       FreeAndNil(result)
     else
-      // supplied one will be owned as a new fUri[].Settings
-      ObjArrayAdd(fUrl, THttpProxyUrl.Create(result, fOwner));
+      // will be owned as a new TSynAutoCreateFields fUri[] instance
+      PtrArrayAdd(fUrl, result);
 end;
 
 function THttpProxyServerSettings.AddFolder(const folder: TFileName;
@@ -6030,7 +6025,6 @@ begin
   end
   else
     fSettings := aSettings;
-  fSettings.Owner := self;
 end;
 
 destructor THttpProxyServer.Destroy;
@@ -6122,6 +6116,7 @@ begin
       fServer.Shutdown;
       FreeAndNil(fServer);
     end;
+  ObjArrayClear(fUrl);
 end;
 
 function THttpProxyServer.SetupTls(var tls: TNetTlsContext): boolean;
@@ -6139,18 +6134,17 @@ var
   i: PtrInt;
 begin
   fSources := [];
+  ObjArrayClear(fUrl);
   new := TUriRouter.Create(TUriTreeNode);
   try
     // 1. compute all routes from Settings[]
     for i := 0 to high(fSettings.Url) do
     begin
-      one := fSettings.Url[i];
-      s := one.Settings;
-      FreeAndNil(one.fMemCache);
-      FreeAndNil(one.fHashCache);
-      FreeAndNil(one.fHeadCache);
+      s := fSettings.Url[i];
       if s.Disabled then
         continue;
+      one := THttpProxyUrl.Create(s, self);
+      PtrArrayAdd(fUrl, one);
       // validate source as local file folder or remote http(s) server
       hps := hpsUndefined;
       if s.Source <> '' then
@@ -6185,19 +6179,19 @@ begin
       if (hps <> hpsEvent) and
          not (psoDisableMemCache in fSettings.Server.Options) then
       begin
-        if s.MemCache.MaxSize < 0 then
-          s.MemCache.MaxSize := fSettings.MemCache.MaxSize;
+        if s.MemCache.MaxSizeKB < 0 then
+          s.MemCache.MaxSizeKB := fSettings.MemCache.MaxSizeKB;
         if s.MemCache.TimeoutSec < 0 then
           s.MemCache.TimeoutSec := fSettings.MemCache.TimeoutSec;
-        if (s.MemCache.MaxSize > 0) and
+        if (s.MemCache.MaxSizeKB > 0) and
            (s.MemCache.TimeoutSec > 0) then
           one.fMemCache := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
             TypeInfo(TRawByteStringDynArray), PathCaseInsensitive,
             s.MemCache.TimeoutSec);
         if hps = hpsRemoteUri then
         begin
-          if s.DiskCache.MaxSize < 0 then
-            s.DiskCache.MaxSize := fSettings.DiskCache.MaxSize;
+          if s.DiskCache.MaxSizeKB < 0 then
+            s.DiskCache.MaxSizeKB := fSettings.DiskCache.MaxSizeKB;
           if s.DiskCache.Path = '' then
             s.DiskCache.Path := fSettings.DiskCache.Path;
           s.DiskCache.Path := EnsureDirectoryExists(s.DiskCache.Path);
@@ -6243,7 +6237,7 @@ begin
     old := fServer.ReplaceRoute(new); // thread-safe
     new := nil; // is owned by fServer from now on
     if old <> nil then
-      ObjArrayAdd(fGC, old); // late release at shutdown
+      PtrArrayAdd(fGC, old); // late release at shutdown
   finally
     new.Free;
   end;
@@ -6251,17 +6245,18 @@ end;
 
 procedure THttpProxyServer.OnIdle(Sender: TObject; NowTix: Int64);
 var
-  i, n: PtrInt;
-  one: THttpProxyUrl;
+  i, n: integer;
+  one: ^THttpProxyUrl;
 begin
-  // delete any deprecated cached content - called every few seconds
+  // delete any deprecated cached content - called every second
   n := 0;
-  for i := 0 to high(fSettings.Url) do
+  one := pointer(fUrl);
+  for i := 1 to length(fUrl) do
   begin
-    one := fSettings.Url[i];
-    inc(n, one.fMemCache.DeleteDeprecated(NowTix));
-    inc(n, one.fHashCache.DeleteDeprecated(NowTix));
-    inc(n, one.fHeadCache.DeleteDeprecated(NowTix));
+    inc(n, one^.fMemCache.DeleteDeprecated(NowTix));
+    inc(n, one^.fHashCache.DeleteDeprecated(NowTix));
+    inc(n, one^.fHeadCache.DeleteDeprecated(NowTix));
+    inc(one);
   end;
   if n <> 0 then
     fLog.Add.Log(sllTrace, 'OnIdle: cache gc=%', [n], self);
@@ -6461,6 +6456,8 @@ initialization
   {$ifndef HASDYNARRAYTYPE}
   Rtti.RegisterObjArray(
     TypeInfo(THttpProxyUrlObjArray), THttpProxyUrl);
+  Rtti.RegisterObjArray(
+    TypeInfo(THttpProxyUrlSettingsObjArray), THttpProxyUrlSettings);
   {$endif HASDYNARRAYTYPE}
 
 end.
