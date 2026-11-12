@@ -1,0 +1,53 @@
+name: roWinJobCloseChildren on macOS
+
+# Temporary check of TExternalProcess roWinJobCloseChildren on real macOS machines.
+# It runs only for the branch which holds it.
+on:
+  push:
+    branches: [ci-closechildren-macos]
+  workflow_dispatch:
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+
+      - name: Install FPC 3.2.2, as starting compiler
+        run: brew install fpc
+
+      - name: Find the fixes_3_2 commit
+        id: fixes
+        run: echo "sha=$(git ls-remote https://gitlab.com/freepascal.org/fpc/source.git refs/heads/fixes_3_2 | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache FPC fixes_3_2
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/fpc-fixes
+          key: fpc-fixes_3_2-${{ matrix.os }}-${{ steps.fixes.outputs.sha }}
+
+      - name: Build FPC fixes_3_2
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash .ci/cc/build_fpc.sh "$HOME/fpc-fixes" "${{ steps.fixes.outputs.sha }}"
+
+      - name: Build and run the tests
+        run: |
+          export PATH="$HOME/fpc-fixes/bin:$PATH" PPC_CONFIG_PATH="$HOME/fpc-fixes/etc"
+          bash .ci/cc/run.sh
+
+      - name: Upload the outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-${{ matrix.os }}
+          path: .ci/cc/out/
+          if-no-files-found: warn
